@@ -1,0 +1,162 @@
+# ==============================================================================
+# reBot Arm B601-DM + Orbbec Gemini 305 v14/v15 主配置文件（config/v14.yaml）
+# ==============================================================================
+# 架构分组：
+#   1. estimator : 层 1 — 单一世界系目标估计器（基于 200Hz 真实 q_act FK）
+#   2. fsm       : 层 2 — 显式有限状态机（8 状态）
+#   3. pbvs      : 层 3 — 统一世界系 PBVS 控制器（默认期望距离 0.35m）
+#   4. safety    : 层 4 — 不可绕过安全护盾（0.42m 软/硬墙、关节限位缓冲、硬速红线）
+#   5. depth     : 4 层深度保护链（适配 Gemini 305 0.07 ~ 1.20m 近距优势）
+#   6. camera    : Orbbec Gemini 305 取流、迟滞 ROI 与光流混合跟踪
+#   7. sim       : B601-DM 离线数字孪生 200Hz MIT 动力学参数（4340P x3 + 4310 x3）
+# ==============================================================================
+
+v14:
+  ctrl_rate_hz: 100.0
+
+  estimator:
+    pose_delay_s: 0.025
+    pose_lpf_tau_s: 0.012
+    kf_q: 1.80
+    kf_r_xy: 0.0023
+    kf_r_z: 0.0038
+    kf_resync_frames: 3
+    kf_static_q_scale: 0.65
+    axis_adapt_enable: true
+    axis_adapt_ref_xy: 0.032
+    axis_adapt_ref_z: 0.080
+    axis_adapt_max_xy: 1.75
+    axis_adapt_max_z: 1.00
+    axis_adapt_confirm: 2
+    axis_adapt_attack_tau: 0.030
+    axis_adapt_release_tau: 0.100
+    target_stale_s: 0.12
+    lead_base_ms: 8.0
+    lead_max_ms: 15.0
+    lead_near_dist: 0.025
+    lead_full_dist: 0.046
+    lead_dir_full_cos: 0.45
+    lead_attack_tau: 0.028
+    lead_release_tau: 0.012
+
+  fsm:
+    deadband_in_m: 0.020
+    deadband_hysteresis: 1.70
+    vel_deadband_off: 0.060
+    vel_deadband_on: 0.130
+    exit_confirm_s: 0.050
+    stop_confirm_s: 0.080
+    docking_dist_m: 0.065
+    fast_start_enable: true
+    fast_start_frames: 2
+    fast_start_dist: 0.028
+    fast_start_dir_cos: 0.80
+    post_brake_settle_s: 0.16
+    post_brake_ext_extra_s: 0.06
+    coast_window_s: 0.12
+    lost_hold_s: 0.30
+
+  pbvs:
+    distance: 0.35                  # Orbbec Gemini 305 期望跟随距离 (m) [0.10, 0.60]
+    servo_direction: 1.0
+    gain: 2.75
+    gain_x: 2.20
+    far_gain_boost: 0.40
+    world_ff_gain: 0.62
+    ff_max_vel: 0.95
+    ff_taper_dist: 0.080
+    ff_taper_max_dist: 0.130
+    ff_taper_speed_ref: 0.35
+    smooth_alpha: 0.50
+    max_accel: 4.25
+    reversal_accel_boost: 2.00
+    reversal_residual_scale: 0.18
+    coast_decay_per20ms: 0.90
+    coast_max_vel: 0.35
+    static_vel_hold_enable: true
+    static_vel_hold_speed: 0.060
+    static_vel_hold_delay_s: 0.030
+    reach_soft_start: 0.24
+    reach_soft_end: 0.38
+    reach_min_scale: 0.70
+    reach_dock_dist: 0.25
+    reach_ff_min_scale: 0.65
+    reach_lead_min_scale: 0.30
+    reach_accel_min_scale: 0.75
+    reach_att_tau: 0.15
+    reach_release_tau: 0.04
+    k_orientation: 1.60
+    orientation_deadband_deg: 2.0
+    ori_cruise_weight_min: 0.80
+    ori_soft_max_deg: 10.0
+    osc_damp_enable: true
+    osc_err_thresh: 0.018
+    osc_min_half_s: 0.14
+    osc_max_half_s: 0.42
+    osc_gain_cut: 0.30
+    osc_decay_tau_s: 0.55
+    osc_confirm_reversals: 3
+    osc_large_err_release: 0.15
+
+  safety:
+    max_vel: 0.85
+    max_vel_angular: 2.00
+    max_vel_joint_dock: 2.00
+    max_vel_joints: [2.50, 2.00, 2.00, 3.00, 3.00, 2.40]
+    joint_vel_grouped_cruise: true
+    joint_limit_cushion_rad: 0.08
+    damping_base: 0.010
+    damping_adaptive: true
+    manipulability_threshold: 0.004
+    min_manip_speed_scale: 0.35
+    hard_wall_margin_m: 0.05
+    workspace_min: [-0.40, -0.35, 0.04]
+    workspace_max: [ 0.42,  0.35, 0.62]
+    workspace_max_radius: 0.42
+
+  depth:
+    min_valid_m: 0.07               # Gemini 305 理想近距下限 7cm（工作下限 4cm）
+    max_valid_m: 1.20               # 有效手部深度上限 (m)
+    max_jump_m: 0.08
+    max_rate_m: 0.05
+    reacq_frames: 5
+    reacq_tol_m: 0.06
+    reacq_bg_margin_m: 0.25
+    anti_lock_frames: 15
+    z_freeze_max_s: 0.20
+    oe_min_cutoff: 0.85
+    oe_beta: 0.45
+
+  camera:
+    width: 848
+    height: 480
+    fps: 60
+    color_exposure_ms: 6.0
+    force_zero_distortion: true
+    hw_timestamp_enable: false
+    hw_max_transport_s: 0.20
+    roi_crop_enable: true
+    roi_crop_scale: 0.68
+    hybrid_track_enable: true
+    hybrid_max_frames: 15
+    hybrid_box_half: 52
+    hybrid_max_step_px: 115
+    diag_enable: true
+    diag_queue_size: 8192
+
+  # B601-DM 离线数字孪生参数（初值基于 4340P/4310，实机扫频后用 joint_sysid.py 刷新）
+  sim:
+    mit_hz: 200.0
+    kp: [120.0, 120.0, 120.0, 18.0, 18.0, 18.0]
+    kd_near: [8.0, 8.0, 8.0, 2.0, 2.0, 2.0]
+    kd_far:  [11.0, 10.0, 10.0, 2.0, 2.0, 2.0]
+    j_eff: [0.150, 0.310, 0.420, 0.060, 0.018, 0.035]
+    j1_ext_coeff: 0.75
+    vel_ff_scale: [0.70, 0.85, 0.85, 0.85, 0.85, 0.85]
+    gravity_ff_scale: [0.0, 0.55, 0.65, 0.65, 0.0, 0.0]
+    viscous_friction: [0.40, 1.10, 1.25, 0.25, 0.15, 0.15]
+    transport_delay_s: 0.005
+    dq_noise_std: 0.035
+    camera_delay_s: 0.025
+    tau_limit_nm: [15.0, 21.0, 21.0, 5.2, 5.2, 5.2]
+    track_err_limit_deg: 12.0

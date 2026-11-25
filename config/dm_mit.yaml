@@ -1,0 +1,171 @@
+# ==============================================================================
+# reBot Arm B601-DM 底层硬件与 MIT 扩展配置文件（config/dm_mit.yaml）
+# ==============================================================================
+# 机械臂型号：Seeed reBot Arm B601-DM（达妙 Damiao 4340P x3 + 4310 x4）
+# 通信方式  ：默认 USB 串口桥 dm-serial (/dev/ttyACM0 @ 921600)，亦兼容 SocketCAN (can0)
+# 主控制模式：200Hz MIT 阻抗控制（含 P0~P4 全套能力），支持切换 posvel 兼容模式
+#
+# 一键回退 / 分阶段调试开关（重启生效）：
+#   - hardware.control_mode: "mit" | "posvel"
+#   - mit_ext.supervisor_enable: false  → 关闭 M6 主动安全监督（保留三级过温与通信容错）
+#   - mit_ext.gain_sched_enable: false  → 退回固定基线 kd
+#   - mit_ext.gravity_ff_enable: false  → 关闭静态重力前馈（tau_ff = 0）
+#   - mit_ext.vel_ff_enable: false      → 退回 P0 纯位置 MIT（dq_des = 0）
+# ==============================================================================
+
+hardware:
+  name: "reBot_B601_DM"
+  channel: "/dev/ttyACM0"         # dm-serial 串口路径；若使用 SocketCAN 可改为 "can0"
+  baudrate: 921600                # 仅 dm-serial (/dev/tty*) 生效
+  control_mode: "mit"             # "mit"（推荐，完整支持 P0~P4） | "posvel"（达妙内置位置速度环回退）
+  control_hz: 200.0               # 底层实时控制线程频率 (Hz)
+  telemetry_hz: 2.0               # 温度监控线程频率 (Hz)
+  return_zero_speed_deg_s: 18.0   # 安全退出缓慢回零速度 (°/s)
+  return_zero_tol_deg: 2.0        # 回零到位容差 (°)
+  return_zero_timeout_s: 20.0     # 回零最长等待超时 (s)
+
+  # 三级过温保护阈值（°C，基于达妙电机 t_mos / t_rotor 最大值）
+  temperatures:
+    alarm_c: 75.0                 # 一级：打印报警，继续运行
+    return_zero_c: 88.0           # 二级：停止运动并缓慢安全回零后失能
+    disconnect_c: 98.0            # 三级：紧急立即失能断开（防烧毁）
+
+  # 7 路达妙电机配置（对齐官方 rebotarm_dm.yaml）
+  motors:
+    - name: joint1
+      motor_id: 0x01
+      feedback_id: 0x11
+      model: "4340P"
+      kp: 120.0
+      kd: 8.0
+      vel_kp: 0.0125
+      vel_ki: 0.004
+      pos_kp: 150.0
+      pos_ki: 0.5
+      vlim: 5.0
+
+    - name: joint2
+      motor_id: 0x02
+      feedback_id: 0x12
+      model: "4340P"
+      kp: 120.0
+      kd: 8.0
+      vel_kp: 0.0125
+      vel_ki: 0.004
+      pos_kp: 150.0
+      pos_ki: 0.5
+      vlim: 5.0
+
+    - name: joint3
+      motor_id: 0x03
+      feedback_id: 0x13
+      model: "4340P"
+      kp: 120.0
+      kd: 8.0
+      vel_kp: 0.0125
+      vel_ki: 0.004
+      pos_kp: 150.0
+      pos_ki: 0.5
+      vlim: 5.0
+
+    - name: joint4
+      motor_id: 0x04
+      feedback_id: 0x14
+      model: "4310"
+      kp: 18.0
+      kd: 2.0
+      vel_kp: 0.0008
+      vel_ki: 0.002
+      pos_kp: 70.0
+      pos_ki: 1.0
+      vlim: 3.0
+
+    - name: joint5
+      motor_id: 0x05
+      feedback_id: 0x15
+      model: "4310"
+      kp: 18.0
+      kd: 2.0
+      vel_kp: 0.0008
+      vel_ki: 0.002
+      pos_kp: 60.0
+      pos_ki: 1.0
+      vlim: 3.0
+
+    - name: joint6
+      motor_id: 0x06
+      feedback_id: 0x16
+      model: "4310"
+      kp: 18.0
+      kd: 2.0
+      vel_kp: 0.0008
+      vel_ki: 0.002
+      pos_kp: 60.0
+      pos_ki: 1.0
+      vlim: 3.0
+
+    - name: gripper
+      motor_id: 0x07
+      feedback_id: 0x17
+      model: "4310"
+      kp: 8.0
+      kd: 1.0
+      vel_kp: 0.0008
+      vel_ki: 0.002
+      pos_kp: 50.0
+      pos_ki: 1.0
+      vlim: 3.0
+
+mit_ext:
+  enable: true
+
+  # P0 · S1：通信瞬时故障容错（绝不单帧丢包半空失能）
+  can_fault_window_s: 0.03        # 连续发送失败 ≥30ms（200Hz 下 6 拍）才判定通信故障
+  can_fault_action: return_to_zero  # return_to_zero=缓慢回零后失能 | emergency=立即失能
+  can_error_log_interval_s: 1.0
+
+  # P0 · 200Hz 真实反馈缓存（达妙 send_mit 自动回传 pos/vel/torq/t_mos/t_rotor）
+  feedback_cache: true
+  feedback_poll_once: true        # dm-serial 建议每拍排空一次 RX 缓冲，确保反馈零滞后
+  feedback_trusted: true          # 首次上电建议运行 tools/mit_feedback_probe.py 实机复核
+  feedback_max_age_s: 0.05
+  record_max_s: 30.0
+
+  # P1：MIT 速度前馈 dq_des + 200Hz FOH 一阶保持插值 + 40ms 看门狗衰减
+  vel_ff_enable: true
+  vel_ff_scale: [0.70, 0.85, 0.85, 0.85, 0.85, 0.85]
+  foh_interp_enable: true
+  foh_upper_dt_s: 0.010
+  vel_ff_watchdog_s: 0.040
+  vel_ff_watchdog_tau_s: 0.030
+  vel_ff_lpf_tau_s: 0.008
+
+  # P3 M2：Pinocchio + 末端 Gemini 305 (68g) + 相机壳3.0 (~27g) 静态重力前馈 tau_ff
+  # 实机首跑后请运行 tools/p3_gravity_verify.py 校准分轴比例
+  gravity_ff_enable: true
+  gravity_ff_scale: [0.0, 0.55, 0.65, 0.65, 0.0, 0.0]
+  gravity_ff_max_nm: [0.0, 10.0, 10.0, 2.2, 1.5, 0.8]
+  gravity_payload_mass_kg: 0.095  # Gemini 305 (~68g) + 相机壳3.0 (~27g)
+  gravity_payload_com_link6_m: [0.055, 0.000, 0.075]  # 0° 倾角前视安装估算质心（link6 局部系）
+  gravity_ff_ramp_in_s: 0.50
+  gravity_ff_slew_nm_s: 25.0
+
+  # P3 M3：伸展度自适应阻尼调度（按水平伸展半径 r 平滑调度 J1~J3 kd）
+  gain_sched_enable: true
+  gain_sched_r_min_m: 0.18
+  gain_sched_r_max_m: 0.36
+  gain_sched_kd_near: [8.0, 8.0, 8.0, 2.0, 2.0, 2.0]
+  gain_sched_kd_far:  [11.0, 10.0, 10.0, 2.0, 2.0, 2.0]
+  gain_sched_kp_scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  gain_sched_slew_per_s: 8.0
+
+  # P4 M6：200Hz 主动安全监督层（碰撞/堵转软停机保持 + 温升前置降额，绝不半空失能）
+  supervisor_enable: true
+  track_err_limit_deg: 12.0
+  track_err_window_s: 0.08
+  # 4340P 峰值 27Nm（限 21Nm）、4310 峰值 7Nm（限 5.2Nm）
+  tau_limit_nm: [15.0, 21.0, 21.0, 5.2, 5.2, 5.2]
+  tau_limit_window_s: 0.08
+  thermal_derate_start_c: 70.0    # MOS/转子温度 >70°C 开始平滑线性降速
+  thermal_derate_full_c: 88.0     # 达二级回零温度时降至最小速度倍率
+  thermal_derate_min_scale: 0.40

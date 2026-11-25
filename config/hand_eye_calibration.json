@@ -1,0 +1,13 @@
+{
+  "T_tcp_camera": [
+    [0.0, -1.0, 0.0, 0.055],
+    [1.0,  0.0, 0.0, 0.000],
+    [0.0,  0.0, 1.0, 0.075],
+    [0.0,  0.0, 0.0, 1.000]
+  ],
+  "calibrated": false,
+  "camera_model": "Orbbec Gemini 305",
+  "bracket_file": "相机壳3.0.3MF",
+  "method": "nominal_zero_tilt_placeholder",
+  "note": "理论 0° 倾角前视初始外参（供数字孪生与离线测试）。真机视觉伺服前请务必运行 python3 tools/handeye_joint_calib.py 完成实机手眼标定！"
+}

@@ -1,0 +1,17 @@
+# B601-DM J7 夹爪（达妙 4310 + 官方刚性平行夹爪）捏合映射配置
+# 首次上机请运行 `python3 tools/gripper_j7_calibrate.py` 实测并回写 closed_deg / open_deg
+pinch:
+  closed_px: 20.0
+  open_px: 200.0
+  filter_type: one_euro
+  smoothing: 0.35
+  min_cutoff_hz: 2.0
+  beta: 0.01
+  dcutoff_hz: 1.0
+  deadband_deg: 2.0
+gripper:
+  enabled: true
+  hold_while_moving: true
+  move_speed_threshold: 0.05
+  closed_deg: 0.0
+  open_deg: 180.0

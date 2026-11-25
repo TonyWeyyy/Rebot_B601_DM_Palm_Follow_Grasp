@@ -1,0 +1,17 @@
+{
+  "home_joint_pos": [
+    0.0,
+    -0.5,
+    -0.5,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "tcp_position": [
+    0.137,
+    0.0,
+    0.318
+  ],
+  "calibrated": false,
+  "note": "B601-DM 初始安全前视 HOME（J2/J3 为负区间）。首次真机运行前请执行 python3 tools/teach_home.py 示教并覆盖。"
+}
