@@ -45,10 +45,14 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)
 
 from gemini305_camera import Gemini305Camera as Gemini2Camera
-from rebot_adapter import RebotAdapter, URDF_PATH, B601_RS_JOINT_NAMES
+from rebot_adapter import RebotAdapter, URDF_PATH, B601_DM_JOINT_NAMES
+from servo_v14.robot_backend import PureNumpyDMKinematics
 from hand_eye_calibration_auto import ArucoTracker, VIEWPOINT_FILE
 
-import pinocchio as pin
+try:
+    import pinocchio as pin
+except ImportError:
+    pin = None
 from scipy.optimize import least_squares
 
 # ── 采样与运动控制参数 ───────────────────────────────────────
@@ -88,20 +92,30 @@ def rot_angle_deg(R):
 
 
 class FKModel:
-    """独立的 Pinocchio 正向运动学模型，支持叠加 6 轴零位偏置 δ，供非线性优化高频调用。
+    """独立的正向运动学模型（优先 Pinocchio，无 Pinocchio 时自动回退精确纯 NumPy DM 引擎）。
 
     设计说明：
-        不直接调用 RebotAdapter.forward_kinematics()，一是为了在 `--reuse` 离线模式下
-        完全脱离机械臂硬件运行，二是避免优化迭代期间干扰控制线程的 Pinocchio data 缓存。
+        支持叠加 6 轴零位偏置 δ，供非线性优化高频调用，同时在 `--reuse` 离线模式与
+        Jetson Orin ARM64（未装 Pinocchio）环境下均可零依赖运行。
     """
 
-    def __init__(self):
-        """从 URDF 构建 Pinocchio 模型并缓存 6 个主动关节的配置向量索引及末端关节 ID。"""
-        self.model = pin.buildModelFromUrdf(os.path.expanduser(URDF_PATH))
-        self.data = self.model.createData()
-        self.idx_q = [self.model.joints[self.model.getJointId(n)].idx_q
-                      for n in B601_RS_JOINT_NAMES]
-        self.jid6 = self.model.getJointId(B601_RS_JOINT_NAMES[-1])
+    def __init__(self, use_pinocchio: bool = True):
+        """从 DM URDF 构建 Pinocchio 模型或纯 NumPy DM 运动学引擎。"""
+        resolved_urdf = os.path.expanduser(URDF_PATH)
+        self.using_pinocchio = bool(use_pinocchio and pin is not None and os.path.exists(resolved_urdf))
+        if self.using_pinocchio:
+            self.model = pin.buildModelFromUrdf(resolved_urdf)
+            self.data = self.model.createData()
+            self.idx_q = [self.model.joints[self.model.getJointId(n)].idx_q
+                          for n in B601_DM_JOINT_NAMES]
+            self.jid6 = self.model.getJointId(B601_DM_JOINT_NAMES[-1])
+            self._np_kin = None
+        else:
+            self.model = None
+            self.data = None
+            self.idx_q = []
+            self.jid6 = -1
+            self._np_kin = PureNumpyDMKinematics(joint_offset_rad=np.zeros(6, dtype=np.float64))
 
     def tcp(self, q6, delta):
         """计算施加零位偏置 δ 后的末端法兰（joint6）位姿矩阵 T_base_tcp。
@@ -113,15 +127,20 @@ class FKModel:
         返回:
             np.ndarray: 4×4 齐次变换矩阵 T_base_tcp（TCP → base，平移单位：m）。
         """
-        q_full = np.zeros(self.model.nq)
-        for k, iq in enumerate(self.idx_q):
-            q_full[iq] = q6[k] + delta[k]
-        pin.forwardKinematics(self.model, self.data, q_full)
-        pin.updateFramePlacements(self.model, self.data)
-        oMi = self.data.oMi[self.jid6]
-        T = np.eye(4)
-        T[:3, :3] = oMi.rotation
-        T[:3, 3] = oMi.translation
+        T = np.eye(4, dtype=np.float64)
+        if self.using_pinocchio:
+            q_full = np.zeros(self.model.nq)
+            for k, iq in enumerate(self.idx_q):
+                q_full[iq] = q6[k] + delta[k]
+            pin.forwardKinematics(self.model, self.data, q_full)
+            pin.updateFramePlacements(self.model, self.data)
+            oMi = self.data.oMi[self.jid6]
+            T[:3, :3] = oMi.rotation
+            T[:3, 3] = oMi.translation
+            return T
+        pos, rot = self._np_kin.fk_only(np.asarray(q6, dtype=np.float64) + np.asarray(delta, dtype=np.float64))
+        T[:3, :3] = rot
+        T[:3, 3] = pos
         return T
 
 
@@ -286,8 +305,14 @@ def main():
             res.append(np.sqrt(DELTA_REG) * delta)
             return np.concatenate(res)
 
-        theta0 = np.zeros(12)
-        theta0[9:12] = [0.05, 0.0, -0.10]              # X 平移初值（相机支架位于法兰附近，单位：m）
+        # B601-DM + 相机壳3.0.3MF (0° 倾角前视) 理论初值，加速 TRF 收敛并避开局部极小值
+        R_nom = np.array([[0.0, -1.0, 0.0],
+                          [1.0,  0.0, 0.0],
+                          [0.0,  0.0, 1.0]], dtype=np.float64)
+        rvec_nom, _ = cv2.Rodrigues(R_nom)
+        theta0 = np.zeros(12, dtype=np.float64)
+        theta0[6:9] = rvec_nom.reshape(3)
+        theta0[9:12] = [0.055, 0.0, 0.075]             # X 平移初值（相机支架位于 link6 前上方，单位：m）
         lb = np.full(12, -np.inf)
         ub = np.full(12, np.inf)
         lb[:6], ub[:6] = -DELTA_BOUND_RAD, DELTA_BOUND_RAD
@@ -303,7 +328,7 @@ def main():
                              np.append(Ts[i][:3, 3], 1.0))[:3] for i in range(n)])
             return np.linalg.norm(pts.std(axis=0)) * 100, pts
 
-        X0 = np.eye(4); X0[:3, 3] = theta0[9:12]
+        _, X0 = unpack(theta0)
         s_before, _ = spread_cm(np.zeros(6), X0)
         s_after, pts = spread_cm(delta, X)
 
@@ -320,24 +345,28 @@ def main():
         if verdict_ok:
             print("✓✓ 联合标定成功")
         elif s_after < 2.0:
-            print("⚠ 分散度达标但 δ 偏大（>15°），需人工核对合理性")
+            print("⚠ 分散度达标但 δ 偏大（≥12°），建议先核对电机机械零位（dm_zero_calibrate.py）")
         else:
-            print("✗ 修正后分散度仍 >2cm：病灶不是零位偏差，")
-            print("  可能是 URDF 连杆几何与实物不符 → 考虑切官方抓取栈路线")
+            print("✗ 修正后分散度仍 >2cm：请先运行 tools/calib_diagnose.py 排查标记尺寸/滑动/内参问题")
 
         # 无论是否通过阈值均落盘保存，并附带分散度质量字段供人工复核
-        with open(OUT_CAL, 'w') as f:
+        with open(OUT_CAL, 'w', encoding='utf-8') as f:
             json.dump({'T_tcp_camera': X.tolist(),
+                       'calibrated': bool(verdict_ok),
                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                        'num_samples': n,
                        'residual_spread_cm': round(float(s_after), 2),
+                       'arm': 'reBot Arm B601-DM',
+                       'camera': 'Orbbec Gemini 305',
+                       'bracket_file': '相机壳3.0.3MF',
                        'method': 'joint_offset_handeye_least_squares'}, f, indent=2)
-        with open(OUT_OFF, 'w') as f:
+        with open(OUT_OFF, 'w', encoding='utf-8') as f:
             json.dump({'joint_offset_rad': delta.tolist(),
                        'joint_offset_deg': np.rad2deg(delta).round(3).tolist(),
+                       'calibrated': bool(verdict_ok),
                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')}, f, indent=2)
         print(f"\n已保存 {OUT_CAL} 和 {OUT_OFF}")
-        print("把完整输出贴给我，我来裁决是否需要把 δ 合入 rebot_adapter.py")
+        print("下次启动 palm_follow_v14.py / mujoco_teleop_v15.py 时将自动加载以上两份标定文件。")
 
     finally:
         # 无论在线还是异常中止，释放 GUI/相机并执行标准安全回零失能

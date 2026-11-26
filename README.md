@@ -35,11 +35,12 @@
 | **相机支架** | [相机壳3.0.3MF](相机壳3.0.3MF) | 3D 打印包裹外壳（外廓 `44×58×26 mm`，内腔 `42×42×26 mm`，两侧预留 `18×10 mm` 走线口，**0° 倾角前视**），建议用 PLA / PETG、0.2mm 层高、≥25% 填充打印；整套腕部相机载荷仅 `~0.095 kg` |
 | **推荐主机** | Ubuntu 22.04 x86_64 或 **NVIDIA Jetson Orin NX 16GB**（JetPack 6 / Ubuntu 22.04，亦兼容 Orin Nano Super 8GB / AGX Orin） | 需至少 1 个 **USB 3.0/3.2 接口**（接 Gemini 305 跑 60fps）与 1 个 USB 接口（接 DM 串口桥）或 Jetson 板载 CAN (`mttcan`) |
 
-### 1.2 从 RS 转向 DM 的重要安全须知
-> **严禁直接复用 B601-RS 的关节角、标定文件或控制器配置！**
+### 1.2 从 B601-RS 迁移到 B601-DM 的重要安全须知
+> **严禁直接复制 B601-RS 的关节角、标定文件或底层控制参数到本项目！**
 > 1. **关节方向相反、J2/J3 为负区间**：B601-DM 的 `joint2` 和 `joint3` 工作范围是 **`[-3.14, 0.0]` rad**（零位支架在 `0`，抬臂为负角），全部 6 个关节轴向均与 RS 相反。
-> 2. **4310 腕部力矩上限更小**：DM 手腕电机 `4310` 峰值力矩为 `7 Nm`（RS00 为 `14 Nm`），底层安全监督默认按 `75%` 封顶在 `[15.0, 21.0, 21.0, 5.2, 5.2, 5.2] Nm`。
+> 2. **4310 腕部力矩与刚度更柔和**：DM 手腕电机 `4310` 峰值力矩为 `7 Nm`（RS00 为 `14 Nm`），底层安全监督默认按 `75%` 封顶在 `[15.0, 21.0, 21.0, 5.2, 5.2, 5.2] Nm`，腕部 MIT 刚度 `kp=18`，因此**必须运行 `p3_gravity_verify.py` 校准重力前馈**以消除静态下垂。
 > 3. **严禁非零位失能**：任何退出路径都必须走完「停止伺服 → 原地保持 → minimum-jerk 缓慢回零到位 → 失能」。
+> 4. **与 RS 的复用边界**：**可复用**的仅是 Gemini 305 相机本体、[相机壳3.0.3MF](相机壳3.0.3MF) 打印件、`0.095 kg` 相机负载重量与桌面 ArUco 标定板；**必须在本机重标**的有 `config/home_pose.json`、`config/grasp.yaml`、`config/dm_mit.yaml`（`gravity_ff_scale`）、`config/hand_eye_calibration.json` 与 `config/joint_offset.json`（因 DM 末端法兰几何、电机力矩特性与个体装配零偏均不同于 RS）。
 
 ---
 
@@ -214,8 +215,8 @@ conda activate rebot-dm
 # 2. 安装 Pinocchio（conda-forge 叫 pinocchio；纯 pip 安装时 PyPI 包名必须叫 `pin`！）
 conda install -c conda-forge pinocchio -y
 
-# 3. 优先使用项目内置硬件 SDK wheel 安装全部依赖
-pip install --find-links third_party/wheels -r requirements.txt
+# 3. 优先使用项目内置硬件 SDK wheel 安装全部依赖（按当前架构目录匹配 x86_64 / aarch64）
+pip install --find-links "third_party/wheels/$(uname -m)" --find-links third_party/wheels -r requirements.txt
 
 # 4. 单独创建项目内 MuJoCo Studio 4.0+ 虚拟环境（Python 3.12）
 ./tools/setup_env.sh --mujoco-only
@@ -243,17 +244,18 @@ python3 tools/check_env.py
 
 ## 四、离线全量验证（无需硬件）
 
-环境装好后，**在连接任何真实硬件前**，运行项目内置一键测试脚本验证全部 4 套自动化测试（代码、DM URDF、支架 STL、动力学与安全墙）：
+环境装好后，**在连接任何真实硬件前**，运行项目内置一键测试脚本验证全部 **5 套自动化测试（23 项）**（覆盖代码、DM URDF、支架 STL、动力学、安全墙与 Jetson 无头/跨机适配）：
 
 ```bash
 ./tools/run_all_tests.sh
 ```
 
-它会自动依次运行以下 4 项测试（也可分别单独执行）：
-1. `python3 tools/test_dm_controller.py` — DM 底层控制（MIT & POS_VEL、P0~P4、Pinocchio vs NumPy 运动学/重力一致，7 项）；
+它会自动依次运行以下 5 项测试（也可分别单独执行）：
+1. `python3 tools/test_dm_controller.py` — DM 底层控制（MIT & POS_VEL、P0~P4、Pinocchio vs NumPy 运动学/重力一致、标定/探针工具接口，8 项）；
 2. `python3 tools/test_v14_architecture.py` — v14 四层架构、Gemini 305 深度保护链、闭环跟踪与 UDP 通道 A（5 项）；
 3. `python3 tools/test_v15_teleop.py` — v15 双向遥操作 8° 对齐门控、DM 负区间限位、250ms 看门狗与 UDP 通道 B（4 项）；
-4. `.venv_mujoco/bin/python tools/test_mujoco_twin_dm.py` — MuJoCo 4.0+ 编译 DM URDF + 相机壳 3.0 STL + Gemini 305 + 对称夹爪自检（1 项）。
+4. `python3 tools/test_jetson_readiness.py` — Jetson ARM64 预设、无头终端按键、跨机来源白名单与纯 NumPy 回退一致性（5 项）；
+5. `.venv_mujoco/bin/python tools/test_mujoco_twin_dm.py` — MuJoCo 4.0+ 编译 DM URDF + 相机壳 3.0 STL + Gemini 305 + 对称夹爪自检（1 项）。
 
 全部 `OK` 后，可先启动一次**无真机离线双向仿真**熟悉界面：
 
@@ -294,19 +296,24 @@ python3 mujoco_teleop_v15.py --sim
 python3 tools/enumerate_camera_modes.py
 
 # 2.2 核对相机内参、畸变（默认 force_zero_distortion=true）与深度实测误差
+#     需将 ArUco 标记（DICT_4X4_50, ID=0，黑边外边长 100mm）置于相机前 20~40cm
 python3 tools/camera_intrinsic_check.py
 
 # 2.3 纯视觉演练（不连接机械臂）：伸手到相机前 15~50cm，确认掌心绿点、深度读数和捏合流畅
 python3 palm_follow_v14.py --no-arm
 ```
+> **实机健康参考值（Gemini 305, USB 3.0）**：彩色 `848x480@60 MJPG` + 深度 `848x480@60 Y16`，内参约 `fx≈408.8, fy≈408.7, cx≈424, cy≈242`，`depth_scale = 1.0000 mm/unit`，`camera_intrinsic_check.py` 正常重投影误差 `< 1.0 px`（实测约 `0.46 px`）、PnP 距离与深度图偏差 `< 3%`（实测约 `1%`）。
 
 ### 第 3 步：验证 DM 200Hz 通信反馈与重力模型符号（P0）
 ```bash
-# 机械臂会以低速抬至默认 HOME，核对 200Hz 反馈精度与 Pinocchio 重力符号，结束后自动安全回零
-python3 tools/mit_feedback_probe.py --pose home
+# 3.1 零运动只读探针（原地不动，先核对 200Hz 通信与反馈缓存）
+python3 tools/mit_feedback_probe.py
+
+# 3.2 低速抬至默认 HOME，核对非零悬臂位姿下的 200Hz 反馈精度与 Pinocchio 重力符号（结束后自动安全回零）
+python3 tools/mit_feedback_probe.py --move-home
 ```
-- 检查报告中 6 轴反馈正常、`can_fail_total == 0` 且重力力矩符号与电机实测力矩方向一致；
-- 若连接报错，检查 [config/dm_mit.yaml](config/dm_mit.yaml) 中的 `hardware.channel` 是否与 `ls /dev/ttyACM*` 一致。
+- 检查报告中 6 轴反馈正常、`can_fail_total == 0`、`max_pos_diff_deg <= 0.30°`，且主要承载轴（J2/J3/J4）重力力矩 `sign_match == True`；
+- 若连接报错，检查 [config/dm_mit.yaml](config/dm_mit.yaml) 中的 `hardware.channel` 是否与 `ls /dev/ttyACM*` 一致，以及当前用户是否已加入 `dialout` 组。
 
 ### 第 4 步：示教工作 HOME 位姿 + 标定 J7 夹爪行程
 ```bash
@@ -326,22 +333,24 @@ python3 tools/p3_gravity_verify.py --pose home
 # 如需同时检验前伸悬臂态：
 python3 tools/p3_gravity_verify.py --pose extended
 ```
-- 脚本会依次测试 `scale = 0.0 → 0.35 → 0.60 → 0.80`，若发现方向反了会自动中止防呆；
+- 脚本会依次测试 `scale = 0.0 → 0.35 → 0.60 → 0.80`，若发现方向反了（下垂反而放大 >0.45°）或 MOS 温度 ≥85°C 会自动中止防呆；
 - 根据输出中下垂最小且不过补的比例，更新 [config/dm_mit.yaml](config/dm_mit.yaml) 中的 `mit_ext.gravity_ff_scale`（通常 J2/J3/J4 在 `0.60 ~ 0.85` 之间）。
 
 ### 第 6 步：新支架 + Gemini 305 手眼外参 & 关节零偏联合标定（关键！）
-准备一张固定贴在桌面上的 **ArUco 标定板**（保持标定全程不动，光线均匀）：
+准备一张固定贴在桌面上的 **ArUco 标定板**（`DICT_4X4_50`，`ID=0`，黑边外边长 `100 mm`，平贴固定不动、光线均匀）：
 
 ```bash
-# 6.1 示教一个让相机清晰看到 ArUco 板的基准观察点，保存至 config/viewpoint.json
-python3 tools/hand_eye_calibration_auto.py
+# 6.1 仅示教一个让相机清晰看到 ArUco 板的基准观察点并保存至 config/viewpoint.json
+#     （加 --dry-run 可在保存 viewpoint.json 并完成安全盒预检后直接退出，避免重复采样）
+python3 tools/hand_eye_calibration_auto.py --dry-run
 
 # 6.2 在基准点附近自动安全采样 16 个组合位姿（每 6 个位姿自动回零散热 40s），
 #     联合求解 T_tcp_camera 与 6 轴零偏，自动覆盖 config/hand_eye_calibration.json 和 config/joint_offset.json
 python3 tools/handeye_joint_calib.py
 ```
-- **验收标准**：脚本末尾输出的不动点残差分散度 **`< 2.0 cm`**（通常 `< 0.5 cm`）即为合格；
-- 标定完成后，可用 `python3 tools/calib_diagnose.py` 复核旋转/平移一致性。
+- **验收标准**：脚本末尾输出的不动点残差分散度 **`< 2.0 cm`**（实测典型值 `0.2 ~ 0.5 cm`）且各轴零偏 `|δ| < 12°` 即为优秀；
+- 标定文件落盘后，`palm_follow_v14.py` 与 `mujoco_teleop_v15.py` 下次启动会**自动加载** `config/hand_eye_calibration.json` 与 `config/joint_offset.json`，无需手动改代码；
+- 如需离线复算优化参数（不动臂、不开相机），可直接执行 `python3 tools/handeye_joint_calib.py --reuse`；若分散度偏大，可运行 `python3 tools/calib_diagnose.py` 定位病灶。
 
 ### 第 7 步：（可选）DM 单关节正弦扫频系统辨识
 若希望进一步优化速度前馈比例、伸展阻尼和离线数字孪生拟合度：
@@ -375,13 +384,16 @@ python3 palm_follow_v14.py
 **常用 CLI 参数与运行快捷键**：
 | 参数 / 快捷键 | 作用 |
 |---|---|
+| `--v14-cfg config/v14_jetson.yaml` | 切换配置文件（如 Jetson 专用 640×480@60fps 预设） |
 | `--sim` | 使用真相机 + 离线 DM 仿真臂（不碰真机总线） |
 | `--distance 0.30` | 临时覆盖期望跟随距离（范围 `0.10 ~ 0.60 m`，默认 `0.35 m`） |
 | `--gain 2.0 --gain-x 1.6` | 临时覆盖竖直/深度增益与水平偏航增益 |
 | `--max-vel 0.25` | 临时覆盖末端线速度上限（硬红线 `≤ 0.85 m/s`） |
 | `--fps 30` / `--fps 60` | 覆盖相机帧率（默认 `60`） |
+| `--detector-backend auto\|cpu\|gpu` | 覆盖 MediaPipe 推理后端（Jetson 无头推荐 `cpu`） |
 | `--no-gripper` / `--no-follow` | 禁用夹爪（启动自动打开）/ 禁用手臂跟随 |
-| `--no-mujoco-sync` / `--headless` | 关闭 UDP 同步 / 无 OpenCV 窗口模式（SSH） |
+| `--headless` / `--auto-start` | 无 OpenCV 窗口模式（SSH 终端按键）/ 到 HOME 后自动启动跟随 |
+| `--mujoco-host <IP>` / `--no-mujoco-sync` | 跨机推送 3D 状态至局域网 PC / 关闭 UDP 同步 |
 | **`g` / `Space`** | 启动或暂停跟随（同时清除 M6 安全监督锁存） |
 | **`q` / `Esc` / `Ctrl+C`** | 统一安全退出：**原地保持 → 缓慢回零到位 → 失能** |
 
@@ -413,7 +425,7 @@ python3 mujoco_teleop_v15.py --max-speed 20        # 真机低速安全双向联
 
 | 配置文件 | 管理内容 | 关键切换项 |
 |---|---|---|
-| [config/dm_mit.yaml](config/dm_mit.yaml) | DM 串口/波特率、7 路电机 MIT/POS_VEL 参数、P0~P4 扩展开关、M6 力矩/过温保护 | `hardware.control_mode: "mit"` 或 `"posvel"`；`vel_ff_enable` / `gravity_ff_enable` / `gain_sched_enable` / `supervisor_enable` 均可独立开关 |
+| [config/dm_mit.yaml](config/dm_mit.yaml) | DM 串口/波特率、7 路电机 MIT/POS_VEL 参数、P0~P4 扩展开关、M6 力矩/过温保护 | `hardware.control_mode: "mit"`（默认，推荐）或 `"posvel"`（内置位置速度环回退，若 MIT 暂未调好重力前馈可先切此档排查）；`vel_ff_enable` / `gravity_ff_enable` / `gain_sched_enable` / `supervisor_enable` 均可独立开关 |
 | [config/v14.yaml](config/v14.yaml) | 四层伺服参数（估计器/FSM/PBVS/安全护盾）、Gemini 305 深度保护、DM 仿真动力学 | `pbvs.distance: 0.35`、`depth.min_valid_m: 0.07`、`safety.workspace_max_radius: 0.42` |
 | [config/grasp.yaml](config/grasp.yaml) | 捏合像素范围、One Euro 滤波、J7 开合角、`hold_while_moving` | `gripper.hold_while_moving: true`（运动时冻结夹爪防抖，停稳再捏合） |
 
@@ -502,7 +514,7 @@ python3 tools/check_env.py
 ./tools/run_all_tests.sh
 ```
 
-> **关于 ARM64 上的 Pinocchio**：`setup_env.sh` 会自动携带 `CMEEL_SKIP_TESTS=1` 安装 `pin`；若目标机器无预编译轮子或未装 conda-forge，脚本会自动降级安装其余全部依赖，`rebot_adapter.py` 运行时会自动切换至**内置精确纯 NumPy B601-DM 运动学/雅可比/静重力引擎**（与 Pinocchio 误差 `< 0.1 mm` / `< 0.002 Nm`），v14/v15 真机与仿真均正常运行。若需要运行手眼联合标定（`tools/handeye_joint_calib.py`），推荐用 Miniforge 安装 `conda install -c conda-forge pinocchio`。
+> **关于 ARM64 上的 Pinocchio**：`setup_env.sh` 会自动携带 `CMEEL_SKIP_TESTS=1` 安装 `pin`；若目标机器无预编译轮子或未装 conda-forge，脚本会自动降级安装其余全部依赖，`rebot_adapter.py` 与手眼标定工具（`hand_eye_calibration_auto.py` / `handeye_joint_calib.py`）运行时均会自动切换至**内置精确纯 NumPy B601-DM 运动学/雅可比/静重力引擎**（与 Pinocchio 误差 `< 0.01 mm` / `< 0.002 Nm`），从标定到 v14/v15 真机与仿真全链路均可零 C++ 编译依赖直接运行。
 
 ### 10.2 Jetson 无显示器（SSH）运行 v14 手掌跟随抓取
 

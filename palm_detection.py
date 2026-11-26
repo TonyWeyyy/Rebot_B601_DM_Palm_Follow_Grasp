@@ -2,7 +2,7 @@
 """
 手掌检测、跟踪与 3D 掌心/捏合提取模块（替代原项目 blue_circle_detection.py）
 ==========================================================================
-基于 MediaPipe Tasks API（``HandLandmarker``, ``VIDEO`` 运行模式）从 Gemini 2
+基于 MediaPipe Tasks API（``HandLandmarker``, ``VIDEO`` 运行模式）从 Orbbec Gemini 305
 RGB-D 图像中实时提取掌心 2D 像素坐标、3D 相机系坐标及拇指-食指捏合距离。
 
 核心流水线与设计要点：

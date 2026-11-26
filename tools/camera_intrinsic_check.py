@@ -116,7 +116,7 @@ def main():
     cu, cv_ = img_pts.mean(axis=0).astype(int)
     h, w = depth_raw.shape
     win = depth_raw[max(0,cv_-6):cv_+7, max(0,cu-6):cu+7].astype(np.float32) * scale
-    win = win[(win > 0.15) & (win < 2.0)]  # 过滤无效零值及超出 Gemini 305 近距有效范围的点
+    win = win[(win > 0.07) & (win < 2.0)]  # 过滤无效零值及超出 Gemini 305 近距有效范围 [0.07, 2.0]m 的点
     z_depth = float(np.median(win)) if len(win) > 10 else None
     print(f"深度图测得标记距离: {z_depth*1000:.0f} mm" if z_depth
           else "深度图该位置无有效值（太近/反光）")

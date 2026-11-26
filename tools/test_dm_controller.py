@@ -270,6 +270,61 @@ class DMControllerUnitTests(unittest.TestCase):
             self.assertLess(float(np.max(np.abs(J1 - J2))), 1e-4)
             self.assertLess(float(np.max(np.abs(g1 - g2))), 2e-3)
 
+    def test_probe_gravity_sysid_and_calib_tool_apis(self) -> None:
+        """验证 mit_feedback_probe / p3_gravity_verify / joint_sysid / handeye 工具依赖的全部接口。"""
+        hw, ext = load_dm_config(DEFAULT_DM_MIT_CONFIG_PATH)
+        hw_m = type(hw)(**{**hw.__dict__, "return_zero_speed_deg_s": 40.0})
+        mock_bus = _MockBusController([0.0, -0.35, -0.35, 0.0, 0.0, 0.0, 0.0])
+        ctrl = ReBotDMMITController(
+            hw_cfg=hw_m,
+            ext_cfg=dict(ext),
+            controller_factory=lambda _cfg, b=mock_bus: b,
+        )
+        ctrl.set_gravity_torque_fn(lambda _q: [0.0, -4.0, -3.0, -0.8, 0.0, 0.0])
+        ctrl.start(install_signal_handlers=False)
+        try:
+            self.assertFalse(ctrl.is_stopped)
+            ctrl.reset_feedback_change_stats()
+            ctrl.set_vel_ff_enable(False)
+            self.assertFalse(ctrl.ext_cfg["vel_ff_enable"])
+            ctrl.set_vel_ff_enable(True)
+            self.assertTrue(ctrl.ext_cfg["vel_ff_enable"])
+            ctrl.set_joint_angles([5.0, -25.0, -25.0, 0.0, 0.0, 0.0, 0.0])
+            time.sleep(0.06)
+            stats = ctrl.get_loop_stats()
+            for key in (
+                "period_p50_ms",
+                "period_p99_ms",
+                "period_max_ms",
+                "send_p99_ms",
+                "sample_p99_ms",
+                "feedback_errors",
+                "feedback_change_ratio",
+                "tau_ff_nm",
+                "cur_kd",
+            ):
+                self.assertIn(key, stats)
+            self.assertEqual(len(stats["tau_ff_nm"]), 6)
+            self.assertEqual(len(stats["cur_kd"]), 6)
+            self.assertEqual(len(ctrl.last_temperatures), 7)
+        finally:
+            ctrl.stop(return_to_zero=True, wait=True)
+        self.assertTrue(ctrl.is_stopped)
+
+        # 验证 handeye_joint_calib.FKModel 在 Pinocchio 与纯 NumPy 模式下完全一致
+        tools_dir = os.path.join(ROOT, "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        from handeye_joint_calib import FKModel
+
+        fk_pin = FKModel(use_pinocchio=True)
+        fk_np = FKModel(use_pinocchio=False)
+        q_test = np.array([0.2, -0.7, -0.6, 0.3, -0.2, 0.4], dtype=np.float64)
+        delta_test = np.deg2rad([0.5, -0.8, 0.4, -1.2, 0.9, -0.3])
+        T_pin = fk_pin.tcp(q_test, delta_test)
+        T_np = fk_np.tcp(q_test, delta_test)
+        self.assertLess(float(np.max(np.abs(T_pin - T_np))), 1e-5)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

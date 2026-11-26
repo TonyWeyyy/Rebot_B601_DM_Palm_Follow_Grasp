@@ -130,7 +130,7 @@ def depth_at_marker(T_m2c, depth_raw, scale, K):
     if not (5 <= ui < w - 5 and 5 <= vi < h - 5):
         return None
     win = depth_raw[vi-5:vi+6, ui-5:ui+6].astype(np.float32) * scale
-    win = win[(win > 0.15) & (win < 2.0)]  # 仅保留 Gemini 305 有效量程 [0.15, 2.0] m 内的点
+    win = win[(win > 0.07) & (win < 2.0)]  # 仅保留 Gemini 305 有效量程 [0.07, 2.0] m 内的点
     if len(win) < 10:
         return None
     return float(np.median(win))

@@ -682,9 +682,15 @@ class ReBotDMMITController:
         self._fb_stamp_mono = 0.0
         self._fb_seq = 0
         self._fb_err_streak = 0
+        self._fb_errors_total = 0
         self._fb_disabled = False
+        self._fb_prev_sig: Optional[tuple[float, ...]] = None
+        self._fb_change_total = 0
+        self._fb_change_hits = 0
 
         self._period_hist_ms: deque[float] = deque(maxlen=400)
+        self._send_hist_ms: deque[float] = deque(maxlen=400)
+        self._sample_hist_ms: deque[float] = deque(maxlen=400)
         self._rec_lock = threading.Lock()
         self._recording = False
         self._rec_rows: list[tuple[float, list[float], list[float], list[float], list[float]]] = []
@@ -852,12 +858,20 @@ class ReBotDMMITController:
                 self._fb_valid = valid
                 self._fb_stamp_mono = now_mono
                 self._fb_seq += 1
+                if all(valid[:6]):
+                    sig = tuple(q[:6]) + tuple(dq[:6]) + tuple(tau[:6])
+                    if self._fb_prev_sig is not None:
+                        self._fb_change_total += 1
+                        if sig != self._fb_prev_sig:
+                            self._fb_change_hits += 1
+                    self._fb_prev_sig = sig
             self._fb_err_streak = 0
             all_6_ok = all(valid[:6])
             t_max = max(t_max_vals) if t_max_vals else None
             return all_6_ok, t_max
         except Exception:
             self._fb_err_streak += 1
+            self._fb_errors_total += 1
             if self._fb_err_streak >= int(self.control_hz):
                 self._fb_disabled = True
                 print("[DM-FB] 反馈缓存连续异常 1s，已自动降级关闭缓存")
@@ -885,6 +899,7 @@ class ReBotDMMITController:
     ) -> tuple[bool, Optional[float]]:
         now_mono = time.monotonic()
         with self._io_lock_guard(lock_timeout):
+            t_send0 = time.perf_counter()
             for idx, (motor, mcfg) in enumerate(zip(self.motors, self.config.motors)):
                 if idx < 6:
                     if self.control_mode == "posvel":
@@ -901,7 +916,11 @@ class ReBotDMMITController:
                 else:
                     # J7 夹爪恒为纯位置 MIT（dq=0, tau=0）
                     motor.send_mit(float(cmd_7[idx]), 0.0, float(mcfg.kp), float(mcfg.kd), 0.0)
-            return self._sample_feedback_under_io_lock(now_mono)
+            t_send1 = time.perf_counter()
+            self._send_hist_ms.append((t_send1 - t_send0) * 1000.0)
+            res = self._sample_feedback_under_io_lock(now_mono)
+            self._sample_hist_ms.append((time.perf_counter() - t_send1) * 1000.0)
+            return res
 
     def _control_loop(self) -> None:
         period = 1.0 / self.control_hz
@@ -1096,19 +1115,77 @@ class ReBotDMMITController:
         hist = list(self._period_hist_ms)
         if hist:
             hist_sorted = sorted(hist)
+            p50 = hist_sorted[min(len(hist_sorted) - 1, int(0.50 * len(hist_sorted)))]
             p99 = hist_sorted[min(len(hist_sorted) - 1, int(0.99 * len(hist_sorted)))]
+            pmax = hist_sorted[-1]
             avg = sum(hist) / len(hist)
         else:
-            p99 = 1000.0 / self.control_hz
-            avg = p99
+            p50 = 1000.0 / self.control_hz
+            p99 = p50
+            pmax = p50
+            avg = p50
+
+        def _p99(buf: deque[float]) -> Optional[float]:
+            vals = sorted(buf)
+            if not vals:
+                return None
+            return vals[min(len(vals) - 1, int(0.99 * len(vals)))]
+
+        with self._fb_lock:
+            fb_change_ratio = (
+                (self._fb_change_hits / self._fb_change_total)
+                if self._fb_change_total > 0
+                else None
+            )
+            tau_ff = list(self._tau_ff_last)
+            cur_kd = list(self._kd_last_6)
+
         return {
             "control_mode": self.control_mode,
             "control_hz": self.control_hz,
             "period_avg_ms": avg,
+            "period_p50_ms": p50,
             "period_p99_ms": p99,
+            "period_max_ms": pmax,
+            "send_p99_ms": _p99(self._send_hist_ms),
+            "sample_p99_ms": _p99(self._sample_hist_ms),
             "can_fail_total": self._can_monitor.total_failures,
             "can_fail_consecutive": self._can_monitor.consecutive_failures,
+            "feedback_errors": self._fb_errors_total,
+            "feedback_change_ratio": fb_change_ratio,
+            "tau_ff_nm": tau_ff,
+            "cur_kd": cur_kd,
         }
+
+    @property
+    def is_stopped(self) -> bool:
+        """与历史标定/工具脚本兼容：控制器已停机或正在收尾关闭。"""
+        return self.shutdown_done_event.is_set() or (self.shutdown_started and not self.started)
+
+    @property
+    def last_temperatures(self) -> list[Optional[float]]:
+        """返回最近一拍 7 路电机温度（max(t_mos, t_rotor)，无有效读数时为 None）。"""
+        snap = self.get_feedback_snapshot()
+        return [float(t) if math.isfinite(t) else None for t in snap["t_mos"]]
+
+    def reset_feedback_change_stats(self) -> None:
+        """重置反馈变化率与周期分布统计（供 mit_feedback_probe.py 分模式对比使用）。"""
+        with self._fb_lock:
+            self._fb_prev_sig = None
+            self._fb_change_total = 0
+            self._fb_change_hits = 0
+        self._period_hist_ms.clear()
+        self._send_hist_ms.clear()
+        self._sample_hist_ms.clear()
+
+    def set_vel_ff_enable(self, enabled: bool) -> None:
+        """运行时切换 P1 速度前馈开关（供 joint_sysid.py P0 vs P1 对比使用）。"""
+        with self.target_lock:
+            self.ext_cfg["vel_ff_enable"] = bool(enabled)
+            if not enabled:
+                self._vel_ff_active = False
+                self._vel_ff_raw[:] = [0.0] * self.motor_count
+                self._vel_ff_filt[:] = [0.0] * self.motor_count
 
     def set_gravity_torque_fn(self, fn: Optional[Callable[[Sequence[float]], Sequence[float]]]) -> None:
         self._gravity_fn = fn

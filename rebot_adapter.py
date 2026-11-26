@@ -79,6 +79,8 @@ class _ArmIO:
         self.ext_cfg = dict(self.arm.ext_cfg)
         self.ext_info = {
             "active": bool(self.ext_cfg.get("enable", True)),
+            "phase": "P0~P4",
+            "reason": "ok" if bool(self.ext_cfg.get("enable", True)) else "disabled_in_yaml",
             "control_mode": self.arm.control_mode,
             "channel": self.arm.channel,
             "cfg": self.ext_cfg,

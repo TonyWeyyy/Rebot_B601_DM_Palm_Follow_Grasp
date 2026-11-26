@@ -255,16 +255,16 @@ def main():
     global first_corner_position, robot_poses, camera_poses
 
     print("=" * 60)
-    print("Eye-in-Hand 手眼标定 (B601 RS + Gemini 305)")
+    print("Eye-in-Hand 手眼标定 (B601-DM + Gemini 305)")
     print("=" * 60)
 
     cam = Gemini2Camera()
     camera_matrix, dist_coeffs = cam.camera_matrix, cam.dist_coeffs
 
     robot = RebotAdapter()
-    # 先运动至屈肘安全准备位，避开全零奇异位并使腕部相机朝向桌面
-    print("移动到初始位姿（屈肘安全位，非全零奇异位）...")
-    robot.move_to_joints([0.0, 1.2, 1.05, 0.0, 0.0, 0.0], speed_deg_s=15.0)
+    # 先运动至 DM 屈肘安全准备位（J2/J3 为负区间 [-3.14, 0]，避开全零奇异位并使腕部相机前视桌面）
+    print("移动到初始位姿（B601-DM 屈肘安全位，非全零奇异位）...")
+    robot.move_to_joints([0.0, -1.0, -0.9, 0.0, 0.0, 0.0], speed_deg_s=15.0)
 
     state = {"joint": 0, "jog": 0.0, "collect": False,
              "calibrate": False, "verify": False, "quit": False}
@@ -375,10 +375,12 @@ def main():
                     verify_points.clear()
                     result = {
                         'T_tcp_camera': T.tolist(),
+                        'calibrated': True,
                         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                         'num_samples': len(robot_poses),
                         'arm': 'reBot Arm B601-DM',
                         'camera': 'Orbbec Gemini 305',
+                        'bracket_file': '相机壳3.0.3MF',
                     }
                     with open(OUT_CAL_FILE, 'w') as f:
                         json.dump(result, f, indent=2)

@@ -377,14 +377,12 @@ def generate_perturbed_poses(robot, q_view):
     返回:
         np.ndarray: 形状 (M, 6) 的有效关节角数组（单位：rad），首项为 q_view。
     """
-    import pinocchio as pin
     rng = np.random.default_rng(RANDOM_SEED)
     amp = np.deg2rad(np.array(PERTURB_AMP_DEG, dtype=np.float64))
     # 相机从法兰外伸且标定前未知，安全盒向内收缩 CAMERA_CLEARANCE
     c = CAMERA_CLEARANCE
     box_min = np.array([WS_X_MIN + c, WS_Y_MIN + c, WS_Z_MIN + c])
     box_max = np.array([WS_X_MAX - c, WS_Y_MAX - c, WS_Z_MAX - c])
-    jid = robot.model.getJointId(robot.joint_names[-1])
     poses = [q_view.copy()]       # 示教位姿本身作为第 1 个样本点
     tries = 0
     while len(poses) < N_AUTO_POSES + 1 and tries < N_AUTO_POSES * 30:
@@ -393,11 +391,8 @@ def generate_perturbed_poses(robot, q_view):
         q = np.clip(q, robot.q_min, robot.q_max)
         if np.max(np.abs(q - q_view)) < np.deg2rad(3):
             continue              # 扰动太小对标定旋转多样性无贡献
-        # FK 校验 TCP 位置在收缩后的安全盒内
-        q_full = robot._build_q_full(q)
-        pin.forwardKinematics(robot.model, robot.data, q_full)
-        pin.updateFramePlacements(robot.model, robot.data)
-        p = robot.data.oMi[jid].translation
+        # FK 校验 TCP 位置在收缩后的安全盒内（兼容 Pinocchio 与 Jetson 纯 NumPy 回退）
+        p, _ = robot.fk_only(q)
         if np.all(p >= box_min) and np.all(p <= box_max):
             poses.append(q)
     return np.array(poses)
@@ -488,11 +483,13 @@ def solve_and_report(robot_poses, camera_poses):
 
     result = {
         'T_tcp_camera': T.tolist(),
+        'calibrated': True,
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
         'num_samples': n,
         'residual_spread_cm': round(float(spread), 2),
         'arm': 'reBot Arm B601-DM',
         'camera': 'Orbbec Gemini 305',
+        'bracket_file': '相机壳3.0.3MF',
         'method': f'teach_viewpoint_joint_perturb_{method}',
     }
     with open(OUT_CAL_FILE, 'w') as f:
@@ -595,7 +592,7 @@ def main(dry_run=False):
             temps = getattr(robot.io.arm, "last_temperatures", [])
             if len(temps) >= 3 and temps[2] is not None:
                 print(f"  J3 电机温度: {temps[2]:.0f}°C  "
-                      f"(110°C 报警 / 125°C 自动回零 / 140°C 紧急失能)")
+                      f"(75°C 报警 / 88°C 自动回零 / 98°C 紧急失能)")
             robot.move_to_joints(q_target, speed_deg_s=MOVE_SPEED_DEG,
                                  wait=True, timeout=40.0)
             time.sleep(SETTLE_S)
@@ -696,7 +693,7 @@ def main(dry_run=False):
         except Exception:
             pass
         robot.stop()
-        print("程序退出（Esc/Ctrl+C → SDK 平滑回零；正常退出 → 保持当前位后失能）")
+        print("程序退出（已安全回零并失能）")
 
 
 if __name__ == "__main__":
