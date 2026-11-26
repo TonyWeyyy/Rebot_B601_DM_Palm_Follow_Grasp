@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -58,7 +59,7 @@ from servo_v14.config import (
     validate_v14_config,
 )
 from servo_v14.depth_guard import DepthProtectionChain
-from servo_v14.mujoco_bridge import DEFAULT_MUJOCO_PORT, MuJoCoTwinPublisher
+from servo_v14.mujoco_bridge import DEFAULT_MUJOCO_HOST, DEFAULT_MUJOCO_PORT, MuJoCoTwinPublisher
 from servo_v14.pipeline import ServoV14Pipeline
 from servo_v14.robot_backend import (
     DEFAULT_DM_HOME_Q,
@@ -66,6 +67,7 @@ from servo_v14.robot_backend import (
     HardwareRobotBackend,
     RobotBackend,
 )
+from servo_v14.terminal_keys import UnifiedKeyListener
 from servo_v14.types import FSMMode, Observation
 
 DEFAULT_HOME_JOINTS = DEFAULT_DM_HOME_Q.copy()
@@ -164,13 +166,25 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--sim", action="store_true", help="启用离线数字孪生机械臂后端（不碰真机总线）")
     p.add_argument("--no-follow", action="store_true", help="仅启用夹爪捏合，禁用手臂跟随")
     p.add_argument("--no-gripper", action="store_true", help="仅启用跟随（启动主动打开夹爪防遮挡）")
-    p.add_argument("--headless", action="store_true", help="无 OpenCV 窗口模式")
+    p.add_argument("--headless", action="store_true", help="无 OpenCV 窗口模式（Jetson/SSH 推荐，自动启用终端按键）")
+    p.add_argument("--auto-start", action="store_true", help="到达 HOME 后自动开启跟随（适合无头/服务化部署）")
     p.add_argument("--distance", type=float, default=None, help="覆盖期望跟随距离 (m，默认 0.35)")
     p.add_argument("--gain", type=float, default=None, help="覆盖竖直/深度增益")
     p.add_argument("--gain-x", type=float, default=None, help="覆盖水平偏航增益")
     p.add_argument("--max-vel", type=float, default=None, help="覆盖最大末端线速度 (m/s, ≤0.85)")
     p.add_argument("--fps", type=int, default=None, help="覆盖相机帧率 (15/30/60)")
+    p.add_argument(
+        "--detector-backend",
+        choices=("auto", "cpu", "gpu"),
+        default=None,
+        help="覆盖 MediaPipe 推理后端（Jetson 无头推荐 cpu）",
+    )
     p.add_argument("--no-mujoco-sync", action="store_true", help="关闭向 MuJoCo Studio 数字孪生的 UDP 同步")
+    p.add_argument(
+        "--mujoco-host",
+        default=DEFAULT_MUJOCO_HOST,
+        help=f"MuJoCo 状态推送目标主机（默认 {DEFAULT_MUJOCO_HOST}；跨机推送到 PC 请填 PC IP）",
+    )
     p.add_argument("--mujoco-port", type=int, default=DEFAULT_MUJOCO_PORT, help=f"MuJoCo UDP 端口（默认 {DEFAULT_MUJOCO_PORT}）")
     return p.parse_args(argv)
 
@@ -189,6 +203,8 @@ def apply_cli_overrides(cfg: V14Config, args: argparse.Namespace) -> V14Config:
         safety = replace(safety, max_vel=args.max_vel)
     if args.fps is not None:
         cam = replace(cam, fps=args.fps)
+    if getattr(args, "detector_backend", None) is not None:
+        cam = replace(cam, detector_backend=str(args.detector_backend).lower())
     return validate_v14_config(replace(cfg, pbvs=pbvs, safety=safety, camera=cam))
 
 
@@ -225,6 +241,18 @@ def main(argv=None) -> int:
     kb_listener = None
 
     stop_event = threading.Event()
+    prev_sigterm = None
+
+    def _on_sigterm(_signum, _frame) -> None:
+        print("\n[v14] 收到 SIGTERM，进入统一安全回零退出链...", flush=True)
+        stop_event.set()
+
+    try:
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except Exception:
+        prev_sigterm = None
+
     state_lock = threading.Lock()
     shared = {
         "following": False,
@@ -291,8 +319,13 @@ def main(argv=None) -> int:
                 pipeline.lock_current_orientation(home_joints)
 
             if not args.no_mujoco_sync:
-                mj_pub = MuJoCoTwinPublisher(port=args.mujoco_port, max_hz=100.0, enabled=True)
-                print(f"[MuJoCo] 实时数字孪生同步已就绪 -> udp://127.0.0.1:{args.mujoco_port}")
+                mj_pub = MuJoCoTwinPublisher(
+                    host=args.mujoco_host,
+                    port=args.mujoco_port,
+                    max_hz=100.0,
+                    enabled=True,
+                )
+                print(f"[MuJoCo] 实时数字孪生同步已就绪 -> udp://{args.mujoco_host}:{args.mujoco_port}")
 
         camera = Gemini305Camera(
             width=cfg.camera.width,
@@ -302,6 +335,7 @@ def main(argv=None) -> int:
             force_zero_distortion=cfg.camera.force_zero_distortion,
         )
         detector = PalmDetector(
+            backend=cfg.camera.detector_backend,
             roi_enable=cfg.camera.roi_crop_enable,
             roi_scale=cfg.camera.roi_crop_scale,
         )
@@ -394,32 +428,28 @@ def main(argv=None) -> int:
             servo_thread = threading.Thread(target=servo_loop, name="dm-v14-servo-100hz", daemon=True)
             servo_thread.start()
 
-        try:
-            from pynput import keyboard as pynput_kb
+        def _on_key(key_name: str) -> Optional[bool]:
+            if key_name in ("esc", "q", "ctrl_c"):
+                stop_event.set()
+                return False
+            if key_name in ("space", "g") and enable_follow:
+                toggle_following()
+            return None
 
-            def on_key_press(key):
-                if key == pynput_kb.Key.esc:
-                    stop_event.set()
-                    return False
-                if key == pynput_kb.Key.space:
-                    if enable_follow:
-                        toggle_following()
-                    return None
-                ch = getattr(key, "char", None)
-                if ch in ("g", "G") and enable_follow:
-                    toggle_following()
-                elif ch in ("q", "Q"):
-                    stop_event.set()
-                    return False
-                return None
+        kb_listener = UnifiedKeyListener(_on_key, prefer_pynput=not args.headless)
+        kb_backend = kb_listener.start()
+        print(f"[按键] 键盘监听后端: {kb_backend}（g/空格 启停跟随 | q/Esc/Ctrl+C 安全回零退出）")
 
-            kb_listener = pynput_kb.Listener(on_press=on_key_press)
-            kb_listener.start()
-        except Exception:
-            kb_listener = None
+        if args.auto_start and enable_follow:
+            print("[v14] --auto-start 已启用：到达 HOME 后自动开始手掌跟随")
+            toggle_following()
 
         seq = 0
         lost_streak = 0
+        fps_win_t = time.monotonic()
+        fps_win_frames = 0
+        vis_fps = 0.0
+        last_headless_print = 0.0
         while not stop_event.is_set():
             t0 = time.perf_counter()
             color_img, depth_img, depth_scale = camera.get_frames(latest_only=True)
@@ -508,13 +538,20 @@ def main(argv=None) -> int:
                     source="sim" if args.sim else "hw",
                 )
 
+            fps_win_frames += 1
+            now_fps = time.monotonic()
+            if now_fps - fps_win_t >= 1.0:
+                vis_fps = fps_win_frames / max(1e-3, now_fps - fps_win_t)
+                fps_win_frames = 0
+                fps_win_t = now_fps
+
             if not args.headless:
                 vis = color_img.copy()
                 if landmarks is not None:
                     draw_landmarks(vis, landmarks)
                 if track is not None and track["lost"] == 0:
                     draw_palm(vis, track, int(camera.cx), int(camera.cy))
-                hud = f"B601-DM v14 [{cur_mode.value}] err={cur_err * 100:.1f}cm"
+                hud = f"B601-DM v14 [{cur_mode.value}] err={cur_err * 100:.1f}cm {vis_fps:.0f}fps"
                 cv2.putText(vis, hud, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 cv2.imshow("reBot B601-DM + Gemini 305 Palm Follow", vis)
                 key = cv2.waitKey(1) & 0xFF
@@ -522,11 +559,24 @@ def main(argv=None) -> int:
                     stop_event.set()
                 elif key in (ord("g"), ord(" ")) and enable_follow:
                     toggle_following()
+            elif now_fps - last_headless_print >= 1.0:
+                last_headless_print = now_fps
+                z_str = f"{obs_new.p_cam[2]:.2f}m" if (obs_new.visible and obs_new.p_cam is not None) else "---"
+                print(
+                    f"[v14-headless] mode={cur_mode.value:11s} vis={'Y' if obs_new.visible else 'N'} "
+                    f"fps={vis_fps:4.1f} det={proc_s * 1000.0:4.1f}ms z={z_str} err={cur_err * 100:4.1f}cm",
+                    flush=True,
+                )
 
     except KeyboardInterrupt:
         print("\n[v14] 收到 Ctrl+C，进入统一安全退出链...")
     finally:
         stop_event.set()
+        if prev_sigterm is not None:
+            try:
+                signal.signal(signal.SIGTERM, prev_sigterm)
+            except Exception:
+                pass
         if "servo_thread" in locals() and servo_thread is not None and servo_thread.is_alive():
             servo_thread.join(timeout=2.0)
         if kb_listener is not None:

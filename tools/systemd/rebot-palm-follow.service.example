@@ -1,0 +1,40 @@
+# ==============================================================================
+# Seeed reBot Arm B601-DM + Orbbec Gemini 305 Jetson Orin NX systemd 服务示例
+# ==============================================================================
+# 安全须知：
+#   - 强烈建议完成全部 7 步实机标定与手动验证稳定后再启用开机自启！
+#   - 必须保留 KillSignal=SIGTERM 与 TimeoutStopSec=35，确保停止服务时触发
+#     程序内置的「停止伺服 → 原地保持 → 缓慢回零到位 → 失能」红线流程，严禁高空掉臂。
+#
+# 安装步骤（请将 <USER> 与 <PROJECT_DIR> 替换为实际用户名和项目路径）：
+#   sudo cp tools/systemd/rebot-palm-follow.service.example /etc/systemd/system/rebot-palm-follow.service
+#   sudo nano /etc/systemd/system/rebot-palm-follow.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rebot-palm-follow.service
+#   journalctl -u rebot-palm-follow.service -f
+# ==============================================================================
+
+[Unit]
+Description=Seeed reBot Arm B601-DM + Gemini 305 Visual Servo (Jetson Orin)
+After=network-online.target multi-user.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<USER>
+Group=dialout
+SupplementaryGroups=video
+WorkingDirectory=<PROJECT_DIR>
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=<PROJECT_DIR>/.venv/bin/python <PROJECT_DIR>/palm_follow_v14.py \
+    --v14-cfg <PROJECT_DIR>/config/v14_jetson.yaml \
+    --headless \
+    --auto-start \
+    --no-mujoco-sync
+KillSignal=SIGTERM
+TimeoutStopSec=35
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

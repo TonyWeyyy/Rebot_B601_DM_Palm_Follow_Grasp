@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -32,6 +33,7 @@ if ROOT not in sys.path:
 
 from servo_v14.config import load_v14_config
 from servo_v14.mujoco_bridge import (
+    DEFAULT_MUJOCO_HOST,
     DEFAULT_MUJOCO_PORT,
     DEFAULT_TELEOP_CMD_PORT,
     MuJoCoTeleopCmdReceiver,
@@ -49,6 +51,7 @@ from servo_v14.teleop_bridge import (
     SafeTeleopController,
     parse_teleop_packet,
 )
+from servo_v14.terminal_keys import UnifiedKeyListener
 
 DEFAULT_HOME_JOINTS = DEFAULT_DM_HOME_Q.copy()
 
@@ -82,8 +85,26 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--no-gripper", action="store_true", help="禁用夹爪遥操作（启动主动打开）")
     p.add_argument("--max-speed", type=float, default=35.0, help="单轴限速上限 (°/s, 5~60，默认 35)")
     p.add_argument("--align-tol", type=float, default=8.0, help="解锁武装前虚实最大单轴误差 (°，默认 8.0)")
+    p.add_argument(
+        "--state-host",
+        type=str,
+        default=DEFAULT_MUJOCO_HOST,
+        help=f"状态上传目标主机（默认 {DEFAULT_MUJOCO_HOST}；Jetson 推 PC 时填 PC IP）",
+    )
     p.add_argument("--state-port", type=int, default=DEFAULT_MUJOCO_PORT, help=f"状态上传端口（默认 {DEFAULT_MUJOCO_PORT}）")
+    p.add_argument(
+        "--cmd-bind",
+        type=str,
+        default=DEFAULT_MUJOCO_HOST,
+        help=f"指令接收绑定地址（默认 {DEFAULT_MUJOCO_HOST}；跨机接收 PC 遥操作请填 0.0.0.0）",
+    )
     p.add_argument("--cmd-port", type=int, default=DEFAULT_TELEOP_CMD_PORT, help=f"指令接收端口（默认 {DEFAULT_TELEOP_CMD_PORT}）")
+    p.add_argument(
+        "--allow-cmd-host",
+        type=str,
+        default="",
+        help="局域网安全白名单：仅接受该来源 IP 的遥操作指令（--cmd-bind 0.0.0.0 时默认自动绑定为 --state-host）",
+    )
     p.add_argument("--watchdog-ms", type=float, default=250.0, help="心跳失联自动保持超时 (ms，默认 250)")
     return p.parse_args(argv)
 
@@ -108,9 +129,16 @@ def main(argv=None) -> int:
         f"硬限速上限: {hard_speed_cap:.1f}°/s | 对齐门限: {teleop_cfg.align_tol_deg:.1f}° | "
         f"夹爪: {'OFF(全开)' if args.no_gripper else f'ON({closed_deg:.1f}~{open_deg:.1f}°)'}"
     )
+    allow_cmd_host = str(args.allow_cmd_host).strip()
+    if not allow_cmd_host and args.cmd_bind == "0.0.0.0" and args.state_host not in ("127.0.0.1", "localhost"):
+        allow_cmd_host = str(args.state_host).strip()
+
     print(
-        f"UDP 双向通道: 状态 -> :{args.state_port} | 指令 <- :{args.cmd_port} "
-        f"(看门狗 {args.watchdog_ms:.0f}ms)"
+        f"UDP 双向通道: 状态 -> {args.state_host}:{args.state_port} | "
+        f"指令 <- {args.cmd_bind}:{args.cmd_port} "
+        f"(看门狗 {args.watchdog_ms:.0f}ms"
+        + (f", 仅允许来源 {allow_cmd_host}" if allow_cmd_host else "")
+        + ")"
     )
     print("按键: Space/h 急停解除武装 | g 清除 M6 锁存 | q/Esc/Ctrl+C 安全回零退出")
     print("=" * 68)
@@ -121,6 +149,17 @@ def main(argv=None) -> int:
     kb_listener = None
 
     stop_event = threading.Event()
+    prev_sigterm = None
+
+    def _on_sigterm(_signum, _frame) -> None:
+        print("\n[v15] 收到 SIGTERM，进入统一安全回零退出链...", flush=True)
+        stop_event.set()
+
+    try:
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except Exception:
+        prev_sigterm = None
     hw_estop_lock = threading.Lock()
     hw_state = {
         "local_disarm": False,
@@ -148,13 +187,20 @@ def main(argv=None) -> int:
             backend.set_gripper_deg(open_deg)
             print(f"[夹爪] --no-gripper 模式：已主动打开至 {open_deg:.1f}°")
 
-        state_pub = MuJoCoTwinPublisher(port=args.state_port, max_hz=100.0, enabled=True)
+        state_pub = MuJoCoTwinPublisher(
+            host=args.state_host,
+            port=args.state_port,
+            max_hz=100.0,
+            enabled=True,
+        )
         cmd_rx = MuJoCoTeleopCmdReceiver(
+            host=args.cmd_bind,
             port=args.cmd_port,
             watchdog_s=max(0.05, float(args.watchdog_ms) * 1e-3),
+            allowed_sender_host=allow_cmd_host,
         )
         if cmd_rx.bind_error:
-            raise RuntimeError(f"无法绑定 MuJoCo 指令端口 :{args.cmd_port} ({cmd_rx.bind_error})")
+            raise RuntimeError(f"无法绑定 MuJoCo 指令端口 {args.cmd_bind}:{args.cmd_port} ({cmd_rx.bind_error})")
 
         controller = SafeTeleopController(
             cfg=teleop_cfg,
@@ -162,35 +208,26 @@ def main(argv=None) -> int:
             enable_gripper=not args.no_gripper,
         )
 
-        try:
-            from pynput import keyboard as pynput_kb
-
-            def on_key_press(key):
-                if key == pynput_kb.Key.esc:
-                    stop_event.set()
-                    return False
-                if key == pynput_kb.Key.space:
-                    with hw_estop_lock:
-                        hw_state["local_disarm"] = True
-                    print("\n[v15 安全] 已按 Space 本地急停解除武装！请在 MuJoCo 先 Disarm 后再重新解锁。")
-                    return None
-                ch = getattr(key, "char", None)
-                if ch in ("q", "Q"):
-                    stop_event.set()
-                    return False
-                if ch in ("h", "H"):
-                    with hw_estop_lock:
-                        hw_state["local_disarm"] = True
-                    print("\n[v15 安全] 已按 h 本地急停解除武装！")
-                elif ch in ("g", "G"):
-                    with hw_estop_lock:
-                        hw_state["clear_fault_req"] = True
+        def _on_key(key_name: str) -> Optional[bool]:
+            if key_name in ("esc", "q", "ctrl_c"):
+                stop_event.set()
+                return False
+            if key_name in ("space", "h"):
+                with hw_estop_lock:
+                    hw_state["local_disarm"] = True
+                print(
+                    f"\n[v15 安全] 已按 {key_name} 本地急停解除武装！请在 MuJoCo 先 Disarm 后再重新解锁。",
+                    flush=True,
+                )
                 return None
+            if key_name == "g":
+                with hw_estop_lock:
+                    hw_state["clear_fault_req"] = True
+            return None
 
-            kb_listener = pynput_kb.Listener(on_press=on_key_press)
-            kb_listener.start()
-        except Exception:
-            kb_listener = None
+        kb_listener = UnifiedKeyListener(_on_key, prefer_pynput=True)
+        kb_backend = kb_listener.start()
+        print(f"[按键] 键盘监听后端: {kb_backend}（Space/h 本地急停解除武装 | g 清 M6 锁存 | q/Esc 安全回零）")
 
         dt_nom = 0.01
         next_tick = time.perf_counter()
@@ -274,6 +311,11 @@ def main(argv=None) -> int:
         print("\n[v15] 收到 Ctrl+C，进入统一安全退出链...")
     finally:
         stop_event.set()
+        if prev_sigterm is not None:
+            try:
+                signal.signal(signal.SIGTERM, prev_sigterm)
+            except Exception:
+                pass
         if kb_listener is not None:
             try:
                 kb_listener.stop()

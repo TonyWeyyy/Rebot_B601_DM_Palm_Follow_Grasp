@@ -29,10 +29,11 @@ import numpy as np
 
 try:
     import pinocchio as pin
-except ImportError as exc:
-    raise ImportError("pip install pinocchio") from exc
+except ImportError:  # pragma: no cover - Jetson ARM64 等无 Pinocchio 环境自动启用纯 NumPy 精确回退
+    pin = None
 
 from dm_controller import DEFAULT_DM_MIT_CONFIG_PATH, ReBotDMMITController
+from servo_v14.robot_backend import PureNumpyDMKinematics
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -127,48 +128,74 @@ class RebotAdapter:
         joint_names: list[str] = B601_DM_JOINT_NAMES,
         dm_config_path: str = DEFAULT_DM_MIT_CONFIG_PATH,
         io: Optional[_ArmIO] = None,
+        use_pinocchio: bool = True,
     ) -> None:
         self.io = io if io is not None else _ArmIO(dm_config_path=dm_config_path)
 
         resolved_urdf = os.path.expanduser(urdf_path)
         self.urdf_path = resolved_urdf
-        self.model = pin.buildModelFromUrdf(resolved_urdf)
-        self.data = self.model.createData()
         self.joint_names = list(joint_names)
         self.motor_count = 6
 
-        # 独立重力动力学模型（绝不与 100Hz FK/雅可比共享 self.data）
-        self._grav_lock = threading.Lock()
-        self._grav_model = pin.buildModelFromUrdf(resolved_urdf)
         ext_cfg = getattr(self.io, "ext_cfg", {}) or {}
         payload_m = float(ext_cfg.get("gravity_payload_mass_kg", 0.095))
         payload_com = np.asarray(
             ext_cfg.get("gravity_payload_com_link6_m", [0.055, 0.0, 0.075]),
             dtype=np.float64,
         )
-        if payload_m > 1e-6:
-            jid6 = self._grav_model.getJointId(self.joint_names[-1])
-            inertia = pin.Inertia(payload_m, payload_com, np.zeros((3, 3), dtype=np.float64))
-            self._grav_model.appendBodyToJoint(jid6, inertia, pin.SE3.Identity())
-        self._grav_data = self._grav_model.createData()
-        self._grav_idx_q = [
-            self._grav_model.joints[self._grav_model.getJointId(n)].idx_q
-            for n in self.joint_names
-        ]
-        self._grav_idx_v = [
-            self._grav_model.joints[self._grav_model.getJointId(n)].idx_v
-            for n in self.joint_names
-        ]
-        self._grav_q_buf = np.zeros(self._grav_model.nq, dtype=np.float64)
 
-        # 软件关节限位（由 DM URDF 动态推导并向内收缩 JOINT_LIMIT_MARGIN）
-        self.q_min = np.zeros(6, dtype=np.float64)
-        self.q_max = np.zeros(6, dtype=np.float64)
-        for i, name in enumerate(self.joint_names):
-            jid = self.model.getJointId(name)
-            qi = self.model.joints[jid].idx_q
-            self.q_min[i] = self.model.lowerPositionLimit[qi] + JOINT_LIMIT_MARGIN
-            self.q_max[i] = self.model.upperPositionLimit[qi] - JOINT_LIMIT_MARGIN
+        # 独立重力动力学模型锁（绝不与 100Hz FK/雅可比竞争）
+        self._grav_lock = threading.Lock()
+        self.using_pinocchio = bool(use_pinocchio and pin is not None and os.path.exists(resolved_urdf))
+        self.model = None
+        self.data = None
+        self._grav_model = None
+        self._grav_data = None
+        self._grav_idx_q: list[int] = []
+        self._grav_idx_v: list[int] = []
+        self._grav_q_buf = np.zeros(0, dtype=np.float64)
+        self._np_kin: Optional[PureNumpyDMKinematics] = None
+
+        if self.using_pinocchio:
+            self.model = pin.buildModelFromUrdf(resolved_urdf)
+            self.data = self.model.createData()
+            self._grav_model = pin.buildModelFromUrdf(resolved_urdf)
+            if payload_m > 1e-6:
+                jid6 = self._grav_model.getJointId(self.joint_names[-1])
+                inertia = pin.Inertia(payload_m, payload_com, np.zeros((3, 3), dtype=np.float64))
+                self._grav_model.appendBodyToJoint(jid6, inertia, pin.SE3.Identity())
+            self._grav_data = self._grav_model.createData()
+            self._grav_idx_q = [
+                self._grav_model.joints[self._grav_model.getJointId(n)].idx_q
+                for n in self.joint_names
+            ]
+            self._grav_idx_v = [
+                self._grav_model.joints[self._grav_model.getJointId(n)].idx_v
+                for n in self.joint_names
+            ]
+            self._grav_q_buf = np.zeros(self._grav_model.nq, dtype=np.float64)
+
+            # 软件关节限位（由 DM URDF 动态推导并向内收缩 JOINT_LIMIT_MARGIN）
+            self.q_min = np.zeros(6, dtype=np.float64)
+            self.q_max = np.zeros(6, dtype=np.float64)
+            for i, name in enumerate(self.joint_names):
+                jid = self.model.getJointId(name)
+                qi = self.model.joints[jid].idx_q
+                self.q_min[i] = self.model.lowerPositionLimit[qi] + JOINT_LIMIT_MARGIN
+                self.q_max[i] = self.model.upperPositionLimit[qi] - JOINT_LIMIT_MARGIN
+        else:
+            self._np_kin = PureNumpyDMKinematics(
+                joint_offset_rad=JOINT_OFFSET,
+                margin_rad=JOINT_LIMIT_MARGIN,
+                payload_mass_kg=payload_m,
+                payload_com_link6_m=payload_com,
+            )
+            self.q_min = self._np_kin.q_min.copy()
+            self.q_max = self._np_kin.q_max.copy()
+            print(
+                "[RebotDMAdapter] 未启用 Pinocchio，已自动切换至内置精确纯 NumPy B601-DM "
+                "运动学/雅可比/静重力引擎（零 C++ 编译依赖）"
+            )
 
         q_now = self.get_current_pos()
         self._q_target = q_now.copy()
@@ -358,23 +385,55 @@ class RebotAdapter:
         return float(self.io.gripper_deg)
 
     def _build_q_full(self, joint_positions) -> np.ndarray:
+        if not self.using_pinocchio or self.model is None:
+            return np.asarray(joint_positions, dtype=np.float64)[:6] + JOINT_OFFSET
         q_full = np.zeros(self.model.nq, dtype=np.float64)
         for i, name in enumerate(self.joint_names):
             jid = self.model.getJointId(name)
             q_full[self.model.joints[jid].idx_q] = float(joint_positions[i]) + float(JOINT_OFFSET[i])
         return q_full
 
-    def forward_kinematics(self) -> dict[str, np.ndarray]:
-        q = self._build_q_full(self.get_current_pos())
-        pin.forwardKinematics(self.model, self.data, q)
+    def fk_only(self, q_rad) -> tuple[np.ndarray, np.ndarray]:
+        q_arr = np.asarray(q_rad, dtype=np.float64)
+        if not self.using_pinocchio:
+            assert self._np_kin is not None
+            return self._np_kin.fk_only(q_arr)
+        q_full = self._build_q_full(q_arr)
+        pin.forwardKinematics(self.model, self.data, q_full)
+        last_jid = self.model.getJointId(self.joint_names[-1])
+        oMi = self.data.oMi[last_jid]
+        return oMi.translation.copy(), oMi.rotation.copy()
+
+    def fk_and_jacobian(self, q_rad) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        q_arr = np.asarray(q_rad, dtype=np.float64)
+        if not self.using_pinocchio:
+            assert self._np_kin is not None
+            return self._np_kin.fk_and_jacobian(q_arr)
+        q_full = self._build_q_full(q_arr)
+        pin.forwardKinematics(self.model, self.data, q_full)
         pin.updateFramePlacements(self.model, self.data)
-        jid = self.model.getJointId(self.joint_names[-1])
-        oMi = self.data.oMi[jid]
-        return {"position": oMi.translation.copy(), "rotation": oMi.rotation.copy()}
+        pin.computeJointJacobians(self.model, self.data, q_full)
+        last_jid = self.model.getJointId(self.joint_names[-1])
+        oMi = self.data.oMi[last_jid]
+        J_full = pin.getJointJacobian(
+            self.model,
+            self.data,
+            last_jid,
+            pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
+        )
+        cols = [self.model.joints[self.model.getJointId(n)].idx_v for n in self.joint_names]
+        return oMi.translation.copy(), oMi.rotation.copy(), J_full[:, cols].copy()
+
+    def forward_kinematics(self) -> dict[str, np.ndarray]:
+        pos, rot = self.fk_only(self.get_current_pos())
+        return {"position": pos, "rotation": rot}
 
     def gravity_torque(self, q_rad, include_payload: bool = False) -> np.ndarray:
         if include_payload:
             return np.asarray(self._gravity_torque_callback(q_rad), dtype=np.float64)
+        if not self.using_pinocchio:
+            assert self._np_kin is not None
+            return self._np_kin.gravity_torque(np.asarray(q_rad, dtype=np.float64), include_payload=False)
         q_full = self._build_q_full(q_rad)
         g_full = pin.computeGeneralizedGravity(self.model, self.data, q_full)
         cols = [self.model.joints[self.model.getJointId(n)].idx_v for n in self.joint_names]
@@ -382,6 +441,10 @@ class RebotAdapter:
 
     def _gravity_torque_callback(self, q_rad) -> list[float]:
         with self._grav_lock:
+            if not self.using_pinocchio:
+                assert self._np_kin is not None
+                tau = self._np_kin.gravity_torque(np.asarray(q_rad, dtype=np.float64), include_payload=True)
+                return [float(x) for x in tau]
             self._grav_q_buf[:] = 0.0
             for i in range(6):
                 self._grav_q_buf[self._grav_idx_q[i]] = float(q_rad[i]) + float(JOINT_OFFSET[i])

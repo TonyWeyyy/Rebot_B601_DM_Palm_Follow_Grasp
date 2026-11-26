@@ -169,8 +169,11 @@ def _load_csv_replay(csv_path: pathlib.Path) -> list[dict[str, Any]]:
 class SimPlugin(plugin.SimPlugin):
     """B601-DM v15.0 双向数字孪生仿真插件（实时镜像 + 日志回放 + 关节滑块/3D IK 控真机）。"""
 
+    udp_bind: str = "127.0.0.1"
     udp_port: int = DEFAULT_MUJOCO_PORT
+    cmd_host: str = "127.0.0.1"
     cmd_port: int = DEFAULT_TELEOP_CMD_PORT
+    allow_state_host: str = ""
     custom_urdf_path: str = ""
 
     show_palm: bool = True
@@ -235,9 +238,19 @@ class SimPlugin(plugin.SimPlugin):
         if self._ik_last_xyz is None:
             self._ik_last_xyz = np.array([0.137, 0.000, 0.318], dtype=np.float64)
         if self._receiver is None:
-            self._receiver = MuJoCoTwinReceiver(port=self.udp_port, stale_timeout_s=0.6)
+            self._receiver = MuJoCoTwinReceiver(
+                host=self.udp_bind,
+                port=self.udp_port,
+                stale_timeout_s=0.6,
+                allowed_sender_host=self.allow_state_host,
+            )
         if self._cmd_pub is None:
-            self._cmd_pub = MuJoCoTeleopCmdPublisher(port=self.cmd_port, max_hz=60.0, enabled=True)
+            self._cmd_pub = MuJoCoTeleopCmdPublisher(
+                host=self.cmd_host,
+                port=self.cmd_port,
+                max_hz=60.0,
+                enabled=True,
+            )
         if not self._available_logs:
             self._scan_logs()
         if self._replay_frames is None:

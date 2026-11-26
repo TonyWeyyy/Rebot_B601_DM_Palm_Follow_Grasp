@@ -137,6 +137,7 @@ v14:
     hw_max_transport_s: 0.20
     roi_crop_enable: true
     roi_crop_scale: 0.68
+    detector_backend: "auto"        # "auto"（桌面优先 GPU）/ "cpu"（Jetson 无头推荐）/ "gpu"
     hybrid_track_enable: true
     hybrid_max_frames: 15
     hybrid_box_half: 52

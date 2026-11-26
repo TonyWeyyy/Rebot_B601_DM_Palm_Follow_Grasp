@@ -1,6 +1,6 @@
 # reBot Arm B601-DM + Orbbec Gemini 305 视觉伺服抓取与双向数字孪生系统（v14 + v15）
 
-本工程为 **100% 独立自包含项目**：内置 B601-DM 完整 URDF/STL 模型、3D 打印支架源文件与网格、MediaPipe 离线手掌模型、达妙 `motorbridge` 与奥比中光 `pyorbbecsdk2` 硬件 SDK Wheel、Orbbec 全系 USB udev 规则、达妙机械零位标定工具以及一键环境搭建与自检脚本。**将本文件夹整体打包拷贝到任意机器、任意路径下，严格按本 README 操作即可独立完成全部安装、标定与运行，无需关联任何外部仓库。**
+本工程为 **100% 独立自包含、支持 x86_64 桌面与 NVIDIA Jetson Orin (`aarch64`, JetPack 6) 双平台** 的完整项目：内置 B601-DM 完整 URDF/STL 模型、3D 打印支架源文件与网格、MediaPipe 离线手掌模型、**x86_64 与 ARM64 双架构** 达妙 `motorbridge` 与奥比中光 `pyorbbecsdk2` 硬件 SDK Wheel、Orbbec 与串口防抢占 udev 规则、达妙机械零位标定工具以及一键环境搭建与自检脚本。**将本文件夹整体打包拷贝到任意机器（PC 或 Jetson Orin）、任意路径下，严格按本 README 操作即可独立完成全部安装、标定与运行，无需关联任何外部仓库。**
 
 **一台 Gemini 305 相机、一次 MediaPipe 21 点检测、一条达妙总线句柄**，即可同时实现：
 - **v14 视觉伺服 + 捏合抓取（`palm_follow_v14.py`）**：手掌 3D 移动 → 机械臂保持固定姿态与期望距离（默认 `0.35 m`）实时跟随；拇指-食指捏合 → J7 刚性平行夹爪同步开合；
@@ -19,6 +19,7 @@
 7. [配置文件说明与按症状调参速查](#七配置文件说明与按症状调参速查)
 8. [常见故障排查 FAQ](#八常见故障排查-faq)
 9. [每次运行前安全 Checklist](#九每次运行前安全-checklist)
+10. [NVIDIA Jetson Orin NX 16GB（JetPack 6）部署与跨机联动指南](#十nvidia-jetson-orin-nx-16gbjetpack-6部署与跨机联动指南)
 
 ---
 
@@ -32,7 +33,7 @@
 | **通信接口** | 达妙 USB 串口桥（默认）或 SocketCAN | 默认 `/dev/ttyACM0 @ 921600`（`dm-serial`）；若使用 USB-CAN 可在 `config/dm_mit.yaml` 中将 `channel` 改为 `can0` |
 | **RGB-D 相机** | Orbbec Gemini 305（USB 版） | 超紧凑全局快门双目相机（`42×42×23 mm`，`~68 g`，基线 `18 mm`），理想工作距离 **`0.07 ~ 0.50 m`**（有效 `0.04 ~ 1.0 m+`），支持 `60fps` 彩色/深度与硬件 D2C 对齐 |
 | **相机支架** | [相机壳3.0.3MF](相机壳3.0.3MF) | 3D 打印包裹外壳（外廓 `44×58×26 mm`，内腔 `42×42×26 mm`，两侧预留 `18×10 mm` 走线口，**0° 倾角前视**），建议用 PLA / PETG、0.2mm 层高、≥25% 填充打印；整套腕部相机载荷仅 `~0.095 kg` |
-| **推荐主机** | Ubuntu 22.04 / 20.04 x86_64 | 需至少 1 个 **USB 3.0 蓝色接口**（接 Gemini 305 跑 60fps）与 1 个 USB 接口（接 DM 串口桥） |
+| **推荐主机** | Ubuntu 22.04 x86_64 或 **NVIDIA Jetson Orin NX 16GB**（JetPack 6 / Ubuntu 22.04，亦兼容 Orin Nano Super 8GB / AGX Orin） | 需至少 1 个 **USB 3.0/3.2 接口**（接 Gemini 305 跑 60fps）与 1 个 USB 接口（接 DM 串口桥）或 Jetson 板载 CAN (`mttcan`) |
 
 ### 1.2 从 RS 转向 DM 的重要安全须知
 > **严禁直接复用 B601-RS 的关节角、标定文件或控制器配置！**
@@ -60,12 +61,13 @@
 ├── 相机壳3.0.3MF                   Gemini 305 腕部外壳 3D 打印源文件
 │
 ├── third_party/                   ★ 内置第三方硬件 SDK 与系统规则（零外部仓库依赖）
-│   ├── wheels/                    预打包 Linux x86_64 cp310 硬件 SDK Wheel：
-│   │   ├── motorbridge-0.5.5-cp310-cp310-manylinux_2_17_x86_64.whl   (达妙电机 SDK + libmotor_abi.so)
-│   │   └── pyorbbecsdk2-2.1.2-cp310-cp310-manylinux_2_27_x86_64.whl  (奥比中光 SDK v2 + libOrbbecSDK.so)
+│   ├── wheels/
+│   │   ├── x86_64/                Linux x86_64 cp310 预打包 SDK Wheel（motorbridge + pyorbbecsdk2）
+│   │   └── aarch64/               Jetson Orin ARM64 cp310 预打包 SDK Wheel（motorbridge + pyorbbecsdk2）
 │   ├── udev/
-│   │   └── 99-obsensor-libusb.rules  奥比中光全系（含 Gemini 305）官方 USB udev 权限规则
-│   └── README.md                  SDK 版本与全离线 wheel 打包说明
+│   │   ├── 99-obsensor-libusb.rules  奥比中光全系（含 Gemini 305）官方 USB udev 权限规则
+│   │   └── 99-rebot-dm-serial.rules  达妙串口权限 + 禁止 ModemManager 抢占规则
+│   └── README.md                  双架构 SDK 版本与全离线 wheel 打包说明
 │
 ├── servo_v14/                     ★ v14/v15 四层解耦核心包
 │   ├── config.py / types.py       不可变 dataclass 配置与强类型数据契约
@@ -74,9 +76,10 @@
 │   ├── state_machine.py           层 2：8 态显式有限状态机
 │   ├── controller_pbvs.py         层 3：固定参考光轴世界系 PBVS 控制器
 │   ├── safety_shield.py           层 4：不可绕过安全护盾（软/硬墙、奇异、限位缓冲、硬速红线）
-│   ├── robot_backend.py           可插拔后端（HardwareRobotBackend + DM DigitalTwinBackend）
+│   ├── robot_backend.py           可插拔后端（HardwareRobotBackend + DM DigitalTwinBackend + 纯 NumPy 回退）
 │   ├── pipeline.py                四层流水线编排器
-│   ├── mujoco_bridge.py           双通道非阻塞本机 UDP 协议（状态 :19870 / 指令 :19871）
+│   ├── terminal_keys.py           桌面 pynput + 无头 SSH POSIX 终端统一按键监听
+│   ├── mujoco_bridge.py           双通道非阻塞 UDP 协议（支持本机与 Jetson↔PC 跨机来源白名单）
 │   └── teleop_bridge.py           v15.0 遥操作安全控制器（5 道安全防线）
 │
 ├── mujoco_twin/                   ★ MuJoCo Studio 4.0+ 3D 实时数字孪生工作区
@@ -89,7 +92,8 @@
 ├── urdf/Rebot_B601_DM/            内置完整 B601-DM URDF 与视觉/碰撞 STL（含 gemini305_mount_v3.stl）
 ├── config/                        全部配置、标定产物与内置离线视觉模型
 │   ├── dm_mit.yaml                ★ DM 底层串口/电机/MIT P0~P4/POS_VEL 切换配置
-│   ├── v14.yaml                   ★ v14 视觉伺服、深度保护与数字孪生参数（日常调参改这里）
+│   ├── v14.yaml                   ★ v14 桌面默认视觉伺服、深度保护与数字孪生参数
+│   ├── v14_jetson.yaml            ★ Jetson Orin NX 16GB 专用低延迟配置预设（640x480@60fps, CPU XNNPACK）
 │   ├── grasp.yaml                 ★ J7 夹爪捏合映射与开合角度标定
 │   ├── home_pose.json             示教 HOME 位姿（首次真机前请用 teach_home.py 重录）
 │   ├── hand_eye_calibration.json  手眼外参 T_tcp_camera（首次真机前请用 handeye_joint_calib.py 重标）
@@ -97,15 +101,18 @@
 │   └── hand_landmarker.task       MediaPipe 手掌关键点离线推理模型（7.5 MB，已内置）
 │
 └── tools/                         安装、自检、标定、系统辨识与离线测试工具集
-    ├── install_udev.sh            ★ 一键安装 Orbbec udev 规则与 dialout/video 串口权限
-    ├── setup_env.sh               ★ 一键在项目内创建 .venv + .venv_mujoco 独立环境
-    ├── check_env.py               ★ 一键自检依赖、内置资产、ROS 冲突与硬件权限
-    ├── run_all_tests.sh           ★ 一键运行全部 4 套离线验证单元测试
-    ├── launch_mujoco_twin.sh      ★ 一键启动 MuJoCo Studio 3D 窗口（自动选用项目内 .venv_mujoco）
+    ├── install_udev.sh            ★ 一键安装 Orbbec/串口 udev 规则、Jetson USB 缓冲与可选 CAN0/mttcan
+    ├── jetson_perf.sh             ★ Jetson Orin 性能档锁定（nvpmodel + jetson_clocks + usbfs=256MB）
+    ├── setup_env.sh               ★ 按架构自动在项目内创建 .venv (+ 可选 .venv_mujoco) 独立环境
+    ├── check_env.py               ★ 跨平台一键自检依赖、内置资产、Jetson USB/功耗与硬件权限
+    ├── run_all_tests.sh           ★ 一键运行全部 5 套离线验证单元测试
+    ├── launch_mujoco_twin.sh      ★ 一键启动 MuJoCo Studio 3D 窗口（支持本机与跨机联动参数）
     ├── dm_zero_calibrate.py       ★ 独立达妙电机机械零位标定 / 清除故障 / 随动读角工具
+    ├── systemd/                   Jetson 无头开机自启 systemd 模板（含 SIGTERM 安全回零）
     ├── test_dm_controller.py      DM 控制器与运动学/重力一致单测
     ├── test_v14_architecture.py   v14 四层架构、深度保护与闭环单测
     ├── test_v15_teleop.py         v15 双向遥操作安全防线单测
+    ├── test_jetson_readiness.py   Jetson ARM64 / 无头按键 / 跨机白名单 / 纯 NumPy 回退单测
     ├── test_mujoco_twin_dm.py     MuJoCo DM 场景与 STL 编译自检
     ├── enumerate_camera_modes.py  枚举 Gemini 305 支持的彩色/深度流档位
     ├── camera_intrinsic_check.py  校验 Gemini 305 内参、畸变与深度精度
@@ -456,3 +463,82 @@ python3 tools/replay_digital_twin.py logs/servo_dm_v14_<timestamp>.csv
 - [ ] 改参后按 `--no-arm` → `--no-follow` → `--no-gripper --gain 1.5 --max-vel 0.15` → 完整模式逐级验收
 - [ ] 工作半径内无人员与易碎物；测试期间**盯紧机械臂实体、手边随时可按 `q` / `Esc` 或硬件电源开关**
 - [ ] 退出一律等待程序完成「保持 → 缓慢回零到位 → 失能」，**严禁在屈肘抬臂状态强制断控失能**
+
+---
+
+## 十、NVIDIA Jetson Orin NX 16GB（JetPack 6）部署与跨机联动指南
+
+本项目针对推荐平台 **Jetson Orin NX 16GB（JetPack 6.x / Ubuntu 22.04 / Python 3.10 / `aarch64`，例如 Seeed reComputer Super J4012）** 完成了全套 ARM64 适配（同时兼容 Orin Nano Super 8GB 与 AGX Orin）。
+
+### 10.1 一键完成 Jetson 端安装与硬件调优
+
+将本项目拷贝或 `git clone` 到 Jetson 的 NVMe SSD 上后，在项目根目录依次执行：
+
+```bash
+# 1. 安装基础系统包（若需在 ARM64 本地编译 pin 建议保留 cmake 与 python3-dev）
+sudo apt-get update
+sudo apt-get install -y \
+    python3 python3-venv python3-pip python3-dev cmake build-essential pkg-config \
+    libgl1 libglib2.0-0 libusb-1.0-0-dev can-utils
+
+# 2. 安装 Orbbec + 达妙串口防 ModemManager 抢占 udev 规则，并自动调高 usbfs_memory_mb=256
+#    - 若使用达妙 USB 串口桥 (/dev/ttyACM0)：
+sudo ./tools/install_udev.sh
+#    - 若使用 Jetson Orin 载板原生 CAN (mttcan -> can0 @ 1Mbps)：
+# sudo ./tools/install_udev.sh --jetson-can
+# （改用 can0 后记得把 config/dm_mit.yaml 中 hardware.channel 改为 "can0"）
+
+# 3. 创建项目内主控环境 .venv（自动命中 third_party/wheels/aarch64/ 内置 ARM64 SDK Wheel！）
+#    默认在 Jetson 上仅装主控环境（节省资源，推荐 PC 跨机跑 MuJoCo 3D）；
+#    如果 Orin NX 16GB 也要本机跑 MuJoCo Studio，请加 --with-mujoco
+./tools/setup_env.sh
+
+# 4. 每次重启后锁定 Orin 高性能档、CPU 时钟与 256MB USB 3.0 缓冲（保障 200Hz MIT 低抖动）
+sudo ./tools/jetson_perf.sh
+
+# 5. 运行跨平台自检与全部离线单元测试
+source .venv/bin/activate
+python3 tools/check_env.py
+./tools/run_all_tests.sh
+```
+
+> **关于 ARM64 上的 Pinocchio**：`setup_env.sh` 会自动携带 `CMEEL_SKIP_TESTS=1` 安装 `pin`；若目标机器无预编译轮子或未装 conda-forge，脚本会自动降级安装其余全部依赖，`rebot_adapter.py` 运行时会自动切换至**内置精确纯 NumPy B601-DM 运动学/雅可比/静重力引擎**（与 Pinocchio 误差 `< 0.1 mm` / `< 0.002 Nm`），v14/v15 真机与仿真均正常运行。若需要运行手眼联合标定（`tools/handeye_joint_calib.py`），推荐用 Miniforge 安装 `conda install -c conda-forge pinocchio`。
+
+### 10.2 Jetson 无显示器（SSH）运行 v14 手掌跟随抓取
+
+无头模式下程序会自动切换为 **POSIX 终端按键监听**（无需 X11 显示器，SSH 终端直接按 `g` / `Space` 启停、按 `q` / `Esc` / `Ctrl+C` 或收到 `SIGTERM` 均触发缓慢回零安全退出），并每秒打印一行实时状态：
+
+```bash
+source .venv/bin/activate
+
+# 推荐：使用 Jetson Orin NX 专属配置（640x480@60fps + ROI 加速 + CPU XNNPACK 零 EGL 报错）
+python3 palm_follow_v14.py --v14-cfg config/v14_jetson.yaml --headless
+
+# 如需同时将 100Hz 状态实时镜像到局域网 PC 的 MuJoCo 3D 窗口：
+python3 palm_follow_v14.py --v14-cfg config/v14_jetson.yaml --headless --mujoco-host <PC_IP>
+
+# 若部署在 Jetson Orin Nano Super 8GB 且负载偏高，可临时降为 30fps：
+python3 palm_follow_v14.py --v14-cfg config/v14_jetson.yaml --headless --fps 30
+```
+
+### 10.3 Jetson ↔ PC 局域网跨机 v15 双向数字孪生遥操作（强烈推荐）
+
+让 **Jetson** 专心跑 200Hz 达妙底层控制与安全保护，**开发机 PC** 跑高帧率 MuJoCo 3D 原生窗口：
+
+```bash
+# 【在 PC 端】启动 MuJoCo Studio 3D 窗口，监听 0.0.0.0:19870 并把遥操作指令发往 Jetson
+./tools/launch_mujoco_twin.sh --native --udp-bind 0.0.0.0 --cmd-host <JETSON_IP> --allow-state-host <JETSON_IP>
+
+# 【在 Jetson 端】启动 v15 双向安全桥接（自动启用来源 IP 白名单，仅允许该 PC 遥控！）
+source .venv/bin/activate
+python3 mujoco_teleop_v15.py --state-host <PC_IP> --cmd-bind 0.0.0.0 --allow-cmd-host <PC_IP> --max-speed 20
+```
+
+> **局域网安全保障**：
+> 1. `--allow-cmd-host <PC_IP>` 会丢弃非白名单 IP 发来的任何 UDP 遥操作包；
+> 2. 仍完整保留 8° 虚实对齐门限、250ms 断网看门狗自动软保持、0.42m 软墙、Z ≥ 5cm 护桌及 SSH 终端 `Space`/`h` 本地急停解除武装。
+
+### 10.4 可选：Jetson 无头 `systemd` 开机自启服务
+
+仓库已在 [tools/systemd/rebot-palm-follow.service.example](tools/systemd/rebot-palm-follow.service.example) 提供服务模板（包含 `--auto-start`、`KillSignal=SIGTERM` 与 `TimeoutStopSec=35` 保障停服时完整执行缓慢回零后再失能）。**请务必先完成第 5 章全部真机标定与手动验证稳定后再启用自启服务。**
+

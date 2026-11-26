@@ -24,8 +24,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode = p.add_mutually_exclusive_group()
     mode.add_argument("--native", action="store_true", help="本地原生桌面 3D 窗口模式")
     mode.add_argument("--web", action="store_true", help="浏览器 WebViewer 模式（默认 http://localhost:8080/）")
+    p.add_argument("--udp-bind", default="127.0.0.1", help="状态接收绑定地址（本机 127.0.0.1；跨机接收 Jetson 请填 0.0.0.0）")
     p.add_argument("--udp-port", type=int, default=19870, help="状态接收 UDP 端口（通道 A，默认 19870）")
+    p.add_argument("--cmd-host", default="127.0.0.1", help="遥操作指令目标主机（本机 127.0.0.1；跨机控 Jetson 请填 Jetson IP）")
     p.add_argument("--cmd-port", type=int, default=19871, help="遥操作指令发送 UDP 端口（通道 B，默认 19871）")
+    p.add_argument("--allow-state-host", default="", help="可选：跨机模式下仅接收该来源 IP 的状态包（如 Jetson IP）")
     p.add_argument("--http-port", type=int, default=8080, help="WebViewer HTTP 端口（仅 --web 生效）")
     p.add_argument("--open-browser", action="store_true", help="启动 --web 后自动打开浏览器")
     p.add_argument("--gfx", default="", help="指定原生图形后端（默认 opengl_headless）")
@@ -50,10 +53,16 @@ def main(argv: list[str] | None = None) -> int:
         [TWIN_DIR / "sim_plugin.py", TWIN_DIR / "viewer_plugin.py"]
     )
     for plg in user_plugins:
+        if hasattr(plg, "udp_bind"):
+            plg.udp_bind = str(args.udp_bind)
         if hasattr(plg, "udp_port"):
             plg.udp_port = int(args.udp_port)
+        if hasattr(plg, "cmd_host"):
+            plg.cmd_host = str(args.cmd_host)
         if hasattr(plg, "cmd_port"):
             plg.cmd_port = int(args.cmd_port)
+        if hasattr(plg, "allow_state_host"):
+            plg.allow_state_host = str(args.allow_state_host)
         if hasattr(plg, "custom_urdf_path"):
             plg.custom_urdf_path = str(args.urdf)
 
@@ -73,14 +82,14 @@ def main(argv: list[str] | None = None) -> int:
     if use_web:
         print(
             f"[MuJoCo Twin DM v15.0] WebViewer 模式启动 -> http://localhost:{args.http_port}/ "
-            f"| UDP 状态:{args.udp_port} <-> 指令:{args.cmd_port}",
+            f"| UDP 状态:{args.udp_bind}:{args.udp_port} <-> 指令:{args.cmd_host}:{args.cmd_port}",
             flush=True,
         )
         launch_web.run(config, plugins=all_plugins)
     else:
         print(
             f"[MuJoCo Twin DM v15.0] 本地原生桌面窗口启动 ({args.width}x{args.height}) "
-            f"| UDP 状态:{args.udp_port} <-> 指令:{args.cmd_port}",
+            f"| UDP 状态:{args.udp_bind}:{args.udp_port} <-> 指令:{args.cmd_host}:{args.cmd_port}",
             flush=True,
         )
         launch_native.run(config, plugins=all_plugins)

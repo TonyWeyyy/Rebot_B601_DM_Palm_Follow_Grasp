@@ -192,6 +192,7 @@ class CameraConfig:
     hw_max_transport_s: float = 0.20
     roi_crop_enable: bool = True
     roi_crop_scale: float = 0.68
+    detector_backend: str = "auto"
     hybrid_track_enable: bool = True
     hybrid_max_frames: int = 15
     hybrid_box_half: int = 52
@@ -338,6 +339,10 @@ def validate_v14_config(cfg: V14Config) -> V14Config:
     _check_range(float(c.width), 320.0, 1920.0, "camera.width")
     _check_range(float(c.height), 240.0, 1200.0, "camera.height")
     _check_range(c.roi_crop_scale, 0.40, 0.90, "camera.roi_crop_scale")
+    if str(c.detector_backend).lower() not in ("auto", "cpu", "gpu"):
+        raise ValueError(
+            f"camera.detector_backend={c.detector_backend!r} 必须为 'auto' / 'cpu' / 'gpu'"
+        )
 
     # 7. 数字孪生校验
     sim = cfg.sim

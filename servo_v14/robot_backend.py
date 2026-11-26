@@ -73,38 +73,10 @@ class HardwareRobotBackend:
         return np.asarray(self.adapter.q_max, dtype=np.float64)
 
     def fk_and_jacobian(self, q: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        import pinocchio as pin
-
-        q_arr = np.asarray(q, dtype=np.float64)
-        q_full = self.adapter._build_q_full(q_arr)
-        pin.forwardKinematics(self.adapter.model, self.adapter.data, q_full)
-        pin.updateFramePlacements(self.adapter.model, self.adapter.data)
-        pin.computeJointJacobians(self.adapter.model, self.adapter.data, q_full)
-
-        last_jid = self.adapter.model.getJointId(self.adapter.joint_names[-1])
-        oMi = self.adapter.data.oMi[last_jid]
-        pos = oMi.translation.copy()
-        rot = oMi.rotation.copy()
-        J_full = pin.getJointJacobian(
-            self.adapter.model,
-            self.adapter.data,
-            last_jid,
-            pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
-        )
-        cols = [
-            self.adapter.model.joints[self.adapter.model.getJointId(n)].idx_v
-            for n in self.adapter.joint_names
-        ]
-        return pos, rot, J_full[:, cols].copy()
+        return self.adapter.fk_and_jacobian(np.asarray(q, dtype=np.float64))
 
     def fk_only(self, q: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        import pinocchio as pin
-
-        q_full = self.adapter._build_q_full(np.asarray(q, dtype=np.float64))
-        pin.forwardKinematics(self.adapter.model, self.adapter.data, q_full)
-        last_jid = self.adapter.model.getJointId(self.adapter.joint_names[-1])
-        oMi = self.adapter.data.oMi[last_jid]
-        return oMi.translation.copy(), oMi.rotation.copy()
+        return self.adapter.fk_only(np.asarray(q, dtype=np.float64))
 
     def get_state(self, now_s: float) -> RobotState:
         q_target = getattr(self.adapter, "_q_target", None)
@@ -302,8 +274,8 @@ class _PureNumpyURDFKinematics:
         ((0.028008, 0.0, 0.040), (0.0, 1.5708, 0.0), (0.0, 0.0, 1.0), -3.14, 3.14),
     )
 
-    # 各连杆 (link_idx, mass_kg, com_local_m) — 含 link1~link6、固定 end_link 与 0.095kg Gemini 305 相机质点
-    _LINK_BODIES = (
+    # 机械臂本体各连杆 (link_idx, mass_kg, com_local_m) — 含 link1~link6 与固定 end_link
+    _BASE_LINK_BODIES = (
         (0, 0.1613, (0.00011361, -0.00061632, 0.02364764)),      # link1
         (1, 1.3266, (-0.13225622, -0.00306170, -0.03083070)),    # link2
         (2, 0.8353, (0.12104004, -0.05362111, -0.03101379)),     # link3
@@ -312,20 +284,35 @@ class _PureNumpyURDFKinematics:
         (5, 0.3663, (0.00000376, -0.00010091, 0.02533086)),      # link6
         # end_link（固定于 link6 [0, 0, 0.15539], rpy=[0, -1.5708, 3.1415], mass=0.50）变换至 link6 系
         (5, 0.5000, (-0.00000704, 0.00000951, 0.08162457)),
-        # 外挂 Orbbec Gemini 305 (68g) + 相机壳3.0 (~27g) 等效质点
+    )
+    # 兼容保留含默认 0.095kg 相机质点的完整列表
+    _LINK_BODIES = _BASE_LINK_BODIES + (
         (5, 0.0950, (0.05500000, 0.00000000, 0.07500000)),
     )
 
-    def __init__(self, joint_offset_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        joint_offset_path: Optional[str] = None,
+        *,
+        joint_offset_rad=None,
+        margin_rad: float = 0.05,
+        payload_mass_kg: float = 0.095,
+        payload_com_link6_m=(0.055, 0.0, 0.075),
+    ) -> None:
         self._fixed_t = [np.array(j[0], dtype=np.float64) for j in self._JOINTS]
         self._fixed_R = [_rpy_matrix(*j[1]) for j in self._JOINTS]
         self._axes = [np.array(j[2], dtype=np.float64) for j in self._JOINTS]
-        margin = 0.05
+        margin = float(margin_rad)
         self.q_min = np.array([j[3] + margin for j in self._JOINTS], dtype=np.float64)
         self.q_max = np.array([j[4] - margin for j in self._JOINTS], dtype=np.float64)
 
+        self._payload_mass_kg = max(0.0, float(payload_mass_kg))
+        self._payload_com = tuple(float(x) for x in payload_com_link6_m[:3])
+
         self.joint_offset = np.zeros(6, dtype=np.float64)
-        if joint_offset_path and os.path.exists(joint_offset_path):
+        if joint_offset_rad is not None:
+            self.joint_offset = np.asarray(joint_offset_rad, dtype=np.float64).reshape(6).copy()
+        elif joint_offset_path and os.path.exists(joint_offset_path):
             try:
                 with open(joint_offset_path, encoding="utf-8") as stream:
                     raw = json.load(stream)
@@ -364,16 +351,22 @@ class _PureNumpyURDFKinematics:
             J[3:, i] = z_list[i]
         return p_end, R_end, J
 
-    def gravity_torque(self, q: np.ndarray) -> np.ndarray:
+    def gravity_torque(self, q: np.ndarray, *, include_payload: bool = True) -> np.ndarray:
         p_list, R_list, z_list = self._chain(np.asarray(q, dtype=np.float64))
         g_vec = np.array([0.0, 0.0, -9.81], dtype=np.float64)
         tau = np.zeros(6, dtype=np.float64)
-        for link_idx, mass, com_local in self._LINK_BODIES:
+        bodies = list(self._BASE_LINK_BODIES)
+        if include_payload and self._payload_mass_kg > 1e-6:
+            bodies.append((5, self._payload_mass_kg, self._payload_com))
+        for link_idx, mass, com_local in bodies:
             c_w = p_list[link_idx] + R_list[link_idx] @ np.asarray(com_local, dtype=np.float64)
             f_g = mass * g_vec
             for i in range(link_idx + 1):
                 tau[i] -= float(np.dot(z_list[i], np.cross(c_w - p_list[i], f_g)))
         return tau
+
+
+PureNumpyDMKinematics = _PureNumpyURDFKinematics
 
 
 class DigitalTwinBackend:

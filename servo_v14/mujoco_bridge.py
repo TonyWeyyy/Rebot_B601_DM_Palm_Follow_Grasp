@@ -163,10 +163,12 @@ class MuJoCoTwinReceiver:
         host: str = DEFAULT_MUJOCO_HOST,
         port: int = DEFAULT_MUJOCO_PORT,
         stale_timeout_s: float = 0.6,
+        allowed_sender_host: str = "",
     ) -> None:
         self.host = str(host)
         self.port = int(port)
         self.stale_timeout_s = float(stale_timeout_s)
+        self.allowed_sender_host = str(allowed_sender_host).strip()
         self._sock: Optional[socket.socket] = None
         self._latest: Optional[dict[str, Any]] = None
         self._last_rx_mono: float = 0.0
@@ -174,6 +176,8 @@ class MuJoCoTwinReceiver:
         self._rate_window_start: float = time.monotonic()
         self.rx_hz: float = 0.0
         self.bind_error: Optional[str] = None
+        self.last_sender_host: str = ""
+        self.dropped_untrusted_count: int = 0
         self._bind()
 
     def _bind(self) -> None:
@@ -194,16 +198,21 @@ class MuJoCoTwinReceiver:
             got = 0
             while True:
                 try:
-                    data, _ = self._sock.recvfrom(8192)
+                    data, addr = self._sock.recvfrom(8192)
                 except BlockingIOError:
                     break
                 except OSError:
                     break
+                sender_ip = str(addr[0]) if addr else ""
+                if self.allowed_sender_host and sender_ip != self.allowed_sender_host:
+                    self.dropped_untrusted_count += 1
+                    continue
                 try:
                     msg = json.loads(data.decode("utf-8"))
                     if isinstance(msg, dict) and _all_finite(msg.get("q_act", []), 6):
                         self._latest = msg
                         self._last_rx_mono = now
+                        self.last_sender_host = sender_ip
                         got += 1
                 except (UnicodeDecodeError, json.JSONDecodeError):
                     continue
@@ -327,10 +336,12 @@ class MuJoCoTeleopCmdReceiver:
         host: str = DEFAULT_MUJOCO_HOST,
         port: int = DEFAULT_TELEOP_CMD_PORT,
         watchdog_s: float = 0.25,
+        allowed_sender_host: str = "",
     ) -> None:
         self.host = str(host)
         self.port = int(port)
         self.watchdog_s = max(0.05, float(watchdog_s))
+        self.allowed_sender_host = str(allowed_sender_host).strip()
         self._sock: Optional[socket.socket] = None
         self._latest: Optional[dict[str, Any]] = None
         self._last_rx_mono: float = 0.0
@@ -338,6 +349,8 @@ class MuJoCoTeleopCmdReceiver:
         self._rate_window_start: float = time.monotonic()
         self.rx_hz: float = 0.0
         self.bind_error: Optional[str] = None
+        self.last_sender_host: str = ""
+        self.dropped_untrusted_count: int = 0
         self._bind()
 
     def _bind(self) -> None:
@@ -358,11 +371,15 @@ class MuJoCoTeleopCmdReceiver:
             got = 0
             while True:
                 try:
-                    data, _ = self._sock.recvfrom(8192)
+                    data, addr = self._sock.recvfrom(8192)
                 except BlockingIOError:
                     break
                 except OSError:
                     break
+                sender_ip = str(addr[0]) if addr else ""
+                if self.allowed_sender_host and sender_ip != self.allowed_sender_host:
+                    self.dropped_untrusted_count += 1
+                    continue
                 try:
                     msg = json.loads(data.decode("utf-8"))
                     if (
@@ -373,6 +390,7 @@ class MuJoCoTeleopCmdReceiver:
                     ):
                         self._latest = msg
                         self._last_rx_mono = now
+                        self.last_sender_host = sender_ip
                         got += 1
                 except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                     continue

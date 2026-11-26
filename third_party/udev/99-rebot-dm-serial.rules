@@ -1,0 +1,4 @@
+# Seeed reBot Arm B601-DM 达妙 USB 串口桥权限规则
+# 1. 允许 dialout 组与本地用户非 root 访问 /dev/ttyACM*
+# 2. 禁止 Ubuntu / Jetson 的 ModemManager 抢占串口（避免插拔后 15s 无法打开或发 AT 指令干扰总线）
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", MODE:="0666", GROUP:="dialout", ENV{ID_MM_DEVICE_IGNORE}="1"
