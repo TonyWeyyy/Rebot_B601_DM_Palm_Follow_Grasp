@@ -169,7 +169,7 @@ def main() -> int:
                     if p.shape == (3,) and J.shape == (6, 6):
                         _warn(
                             "pinocchio 未安装，但内置精确纯 NumPy B601-DM 运动学/重力引擎可用 "
-                            "（v14/v15 真机与仿真均正常运行；手眼联合标定脚本仍建议安装 pinocchio）"
+                            "（从手眼联合标定到 v14/v15 真机与仿真全链路均正常运行，无需编译 Pinocchio）"
                         )
                         continue
                 except Exception:
@@ -187,10 +187,13 @@ def main() -> int:
         "config/dm_mit.yaml",
         "config/v14.yaml",
         "config/v14_jetson.yaml",
+        "config/v14_orin_nano.yaml",
         "config/grasp.yaml",
         "config/home_pose.json",
         "config/hand_eye_calibration.json",
         "config/joint_offset.json",
+        "requirements-orin-nano.txt",
+        "tools/run_orin_nano.sh",
         "third_party/udev/99-obsensor-libusb.rules",
         "third_party/udev/99-rebot-dm-serial.rules",
     ]
@@ -268,6 +271,25 @@ def main() -> int:
             r = subprocess.run(["nvpmodel", "-q"], capture_output=True, text=True, check=False)
             summary = " ".join(r.stdout.strip().splitlines()) if r.stdout else "需 sudo 查询"
             _ok(f"Jetson nvpmodel 状态: {summary}")
+        # 8GB Orin Nano 内存与 Swap 专项检查
+        meminfo = Path("/proc/meminfo")
+        if meminfo.is_file():
+            try:
+                kv = {}
+                for ln in meminfo.read_text(encoding="utf-8").splitlines():
+                    parts = ln.split()
+                    if len(parts) >= 2:
+                        kv[parts[0].rstrip(":")] = int(parts[1])
+                mem_mb = kv.get("MemTotal", 0) // 1024
+                avail_mb = kv.get("MemAvailable", 0) // 1024
+                swap_mb = kv.get("SwapTotal", 0) // 1024
+                _ok(f"Jetson 内存: 可用 {avail_mb} MB / 总计 {mem_mb} MB | Swap: {swap_mb} MB")
+                if mem_mb <= 9600 and swap_mb < 3500:
+                    _warn("Orin Nano 8GB 建议配置 >= 4GB Swap 防 OOM: sudo ./tools/jetson_perf.sh --setup-swap 4G")
+                if mem_mb <= 9600 and avail_mb < 3500:
+                    _warn("Orin Nano 8GB 当前可用内存偏低，建议关闭桌面无头启动: sudo ./tools/jetson_perf.sh --headless-boot")
+            except Exception:
+                pass
 
     try:
         user = pwd.getpwuid(os.getuid()).pw_name

@@ -193,6 +193,8 @@ class CameraConfig:
     roi_crop_enable: bool = True
     roi_crop_scale: float = 0.68
     detector_backend: str = "auto"
+    detect_stride: int = 1
+    cv_num_threads: int = 0
     hybrid_track_enable: bool = True
     hybrid_max_frames: int = 15
     hybrid_box_half: int = 52
@@ -343,6 +345,10 @@ def validate_v14_config(cfg: V14Config) -> V14Config:
         raise ValueError(
             f"camera.detector_backend={c.detector_backend!r} 必须为 'auto' / 'cpu' / 'gpu'"
         )
+    if not (1 <= int(c.detect_stride) <= 4):
+        raise ValueError(f"camera.detect_stride={c.detect_stride} 必须在 [1, 4]")
+    if not (0 <= int(c.cv_num_threads) <= 16):
+        raise ValueError(f"camera.cv_num_threads={c.cv_num_threads} 必须在 [0, 16]")
 
     # 7. 数字孪生校验
     sim = cfg.sim

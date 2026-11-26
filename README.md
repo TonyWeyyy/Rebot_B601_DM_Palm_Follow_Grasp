@@ -19,7 +19,7 @@
 7. [配置文件说明与按症状调参速查](#七配置文件说明与按症状调参速查)
 8. [常见故障排查 FAQ](#八常见故障排查-faq)
 9. [每次运行前安全 Checklist](#九每次运行前安全-checklist)
-10. [NVIDIA Jetson Orin NX 16GB（JetPack 6）部署与跨机联动指南](#十nvidia-jetson-orin-nx-16gbjetpack-6部署与跨机联动指南)
+10. [NVIDIA Jetson Orin Nano 8GB（JetPack 6）专项部署与跨机联动指南](#十nvidia-jetson-orin-nano-8gbjetpack-6专项部署与跨机联动指南)
 
 ---
 
@@ -57,7 +57,8 @@
 ├── kalman_target.py               3D 恒速卡尔曼滤波（分轴 Q + 深度冻结期 XY 子空间更新）
 ├── servo_timing.py                时间校准 / 静止保持 / 伸展调度 / 软墙 / 振荡阻尼等纯算法
 ├── servo_diagnostics.py           非阻塞高频 CSV 诊断记录器
-├── requirements.txt               主控制 Python 环境依赖清单（含 PyPI `pin`、SDK、OpenCV 等）
+├── requirements.txt               主控制 Python 环境依赖清单（桌面 / Orin NX）
+├── requirements-orin-nano.txt     ★ Jetson Orin Nano 8GB 轻量防 OOM 依赖清单（零 C++ 编译、无 open3d 冗余）
 ├── requirements-mujoco.txt        MuJoCo Studio 4.0+ 数字孪生环境依赖清单
 ├── 相机壳3.0.3MF                   Gemini 305 腕部外壳 3D 打印源文件
 │
@@ -80,6 +81,7 @@
 │   ├── robot_backend.py           可插拔后端（HardwareRobotBackend + DM DigitalTwinBackend + 纯 NumPy 回退）
 │   ├── pipeline.py                四层流水线编排器
 │   ├── terminal_keys.py           桌面 pynput + 无头 SSH POSIX 终端统一按键监听
+│   ├── mjpeg_preview.py           无头远程调试超轻量 MJPEG 预览服务（按需启用，零客户端时零开销）
 │   ├── mujoco_bridge.py           双通道非阻塞 UDP 协议（支持本机与 Jetson↔PC 跨机来源白名单）
 │   └── teleop_bridge.py           v15.0 遥操作安全控制器（5 道安全防线）
 │
@@ -94,7 +96,8 @@
 ├── config/                        全部配置、标定产物与内置离线视觉模型
 │   ├── dm_mit.yaml                ★ DM 底层串口/电机/MIT P0~P4/POS_VEL 切换配置
 │   ├── v14.yaml                   ★ v14 桌面默认视觉伺服、深度保护与数字孪生参数
-│   ├── v14_jetson.yaml            ★ Jetson Orin NX 16GB 专用低延迟配置预设（640x480@60fps, CPU XNNPACK）
+│   ├── v14_orin_nano.yaml         ★ Jetson Orin Nano 8GB 专属配置（640x480@30fps, 限线程防抢核, 8GB 内存友好）
+│   ├── v14_jetson.yaml            Jetson Orin NX 16GB / AGX Orin 60fps 配置预设
 │   ├── grasp.yaml                 ★ J7 夹爪捏合映射与开合角度标定
 │   ├── home_pose.json             示教 HOME 位姿（首次真机前请用 teach_home.py 重录）
 │   ├── hand_eye_calibration.json  手眼外参 T_tcp_camera（首次真机前请用 handeye_joint_calib.py 重标）
@@ -103,8 +106,9 @@
 │
 └── tools/                         安装、自检、标定、系统辨识与离线测试工具集
     ├── install_udev.sh            ★ 一键安装 Orbbec/串口 udev 规则、Jetson USB 缓冲与可选 CAN0/mttcan
-    ├── jetson_perf.sh             ★ Jetson Orin 性能档锁定（nvpmodel + jetson_clocks + usbfs=256MB）
-    ├── setup_env.sh               ★ 按架构自动在项目内创建 .venv (+ 可选 .venv_mujoco) 独立环境
+    ├── jetson_perf.sh             ★ Jetson Orin Nano/NX 自动最高功耗档 + 锁频 + 4GB Swap + 无头启动切换
+    ├── run_orin_nano.sh           ★ Jetson Orin Nano 8GB 一键低抖动启动脚本（自动线程隔离 + --super60）
+    ├── setup_env.sh               ★ 按平台/内存自动搭建 .venv（Orin Nano 自动防 OOM 精简安装）
     ├── check_env.py               ★ 跨平台一键自检依赖、内置资产、Jetson USB/功耗与硬件权限
     ├── run_all_tests.sh           ★ 一键运行全部 5 套离线验证单元测试
     ├── launch_mujoco_twin.sh      ★ 一键启动 MuJoCo Studio 3D 窗口（支持本机与跨机联动参数）
@@ -478,79 +482,92 @@ python3 tools/replay_digital_twin.py logs/servo_dm_v14_<timestamp>.csv
 
 ---
 
-## 十、NVIDIA Jetson Orin NX 16GB（JetPack 6）部署与跨机联动指南
+## 十、NVIDIA Jetson Orin Nano 8GB（JetPack 6）专项部署与跨机联动指南
 
-本项目针对推荐平台 **Jetson Orin NX 16GB（JetPack 6.x / Ubuntu 22.04 / Python 3.10 / `aarch64`，例如 Seeed reComputer Super J4012）** 完成了全套 ARM64 适配（同时兼容 Orin Nano Super 8GB 与 AGX Orin）。
+本分支（`feat/jetson-orin-nano-8gb`）针对 **NVIDIA Jetson Orin Nano 8GB 开发套件**（6 核 Cortex-A78AE + 8GB 统一内存，自动兼容标准 15W 与 **JetPack 6.2+ Super 25W / MAXN_SUPER** 模式，Ubuntu 22.04 / Python 3.10 / `aarch64`）完成了全链路轻量化与防 OOM 深度重构。
 
-### 10.1 一键完成 Jetson 端安装与硬件调优
+### 10.1 Orin Nano 8GB 硬件接线与供电必读
+1. **务必使用官方 19V 足功率电源（≥ 45W）与 NVMe SSD 启动**：同时带动 Orin Nano（15W/25W）+ Gemini 305 USB 3.2 + 达妙串口桥时，供电不足或 SD 卡 I/O 抖动会导致相机掉线或 200Hz 周期漂移。
+2. **机械臂通信默认使用达妙 USB 串口桥（`/dev/ttyACM0 @ 921600`）**：Orin Nano 官方开发板载板未板载 CAN 收发器芯片，请直接将达妙 USB 串口桥插入板载 4 个 USB 3.2 Type-A 之一；Gemini 305 插入另一个 USB 3.2 Type-A 口（`lsusb -t` 应显示 `5000M/10000M`）。
 
-将本项目拷贝或 `git clone` 到 Jetson 的 NVMe SSD 上后，在项目根目录依次执行：
+### 10.2 8GB 统一内存防 OOM 与一键安装流程
+
+将本项目拷贝或克隆至 Orin Nano 的 NVMe SSD 后，在项目根目录依次执行：
 
 ```bash
-# 1. 安装基础系统包（若需在 ARM64 本地编译 pin 建议保留 cmake 与 python3-dev）
+# 1. 安装系统底层基础包
 sudo apt-get update
 sudo apt-get install -y \
-    python3 python3-venv python3-pip python3-dev cmake build-essential pkg-config \
-    libgl1 libglib2.0-0 libusb-1.0-0-dev can-utils
+    python3 python3-venv python3-pip \
+    git curl libgl1 libglib2.0-0 libusb-1.0-0-dev can-utils
 
-# 2. 安装 Orbbec + 达妙串口防 ModemManager 抢占 udev 规则，并自动调高 usbfs_memory_mb=256
-#    - 若使用达妙 USB 串口桥 (/dev/ttyACM0)：
+# 2. 安装 Orbbec + 达妙串口防 ModemManager 抢占 udev 规则，并调高 usbfs_memory_mb=256
 sudo ./tools/install_udev.sh
-#    - 若使用 Jetson Orin 载板原生 CAN (mttcan -> can0 @ 1Mbps)：
-# sudo ./tools/install_udev.sh --jetson-can
-# （改用 can0 后记得把 config/dm_mit.yaml 中 hardware.channel 改为 "can0"）
+# （插拔 Gemini 305 与达妙串口线，并注销重登使 dialout/video 组生效）
 
-# 3. 创建项目内主控环境 .venv（自动命中 third_party/wheels/aarch64/ 内置 ARM64 SDK Wheel！）
-#    默认在 Jetson 上仅装主控环境（节省资源，推荐 PC 跨机跑 MuJoCo 3D）；
-#    如果 Orin NX 16GB 也要本机跑 MuJoCo Studio，请加 --with-mujoco
+# 3. 强烈推荐：为 8GB 内存配置 4GB NVMe Swap，并自动锁定 Orin Nano 最高功耗档（含 Super 25W/MAXN_SUPER）
+sudo ./tools/jetson_perf.sh --setup-swap 4G
+
+#    （强烈建议）若无需接显示器跑 Ubuntu GNOME 桌面，一键切换纯命令行无头启动，立省约 1.8GB 内存：
+# sudo ./tools/jetson_perf.sh --headless-boot && sudo reboot
+#    （随时可用 `sudo ./tools/jetson_perf.sh --desktop-boot` 恢复图形桌面）
+
+# 4. 一键创建项目内 .venv（自动识别 Orin Nano 8GB）：
+#    - 自动采用精简清单 requirements-orin-nano.txt（跳过 pin 本地 C++ 编译，彻底杜绝 8GB OOM；
+#      rebot_adapter.py 与手眼标定工具均自动启用内置精确纯 NumPy B601-DM 引擎，误差 <0.01mm / <0.002Nm）；
+#    - 自动以 `--no-deps` 安装内置 third_party/wheels/aarch64/ 中的 pyorbbecsdk2，
+#      绕过 ARM64 上无轮子且占用 500MB+ 的 open3d / pygame / av 冗余依赖；
+#    - 默认不在 8GB 板子上装 MuJoCo（推荐在开发 PC 跨机跑 3D 窗口）。
 ./tools/setup_env.sh
 
-# 4. 每次重启后锁定 Orin 高性能档、CPU 时钟与 256MB USB 3.0 缓冲（保障 200Hz MIT 低抖动）
-sudo ./tools/jetson_perf.sh
-
-# 5. 运行跨平台自检与全部离线单元测试
+# 5. 运行跨平台自检与全部 5 套离线单元测试
 source .venv/bin/activate
 python3 tools/check_env.py
 ./tools/run_all_tests.sh
 ```
 
-> **关于 ARM64 上的 Pinocchio**：`setup_env.sh` 会自动携带 `CMEEL_SKIP_TESTS=1` 安装 `pin`；若目标机器无预编译轮子或未装 conda-forge，脚本会自动降级安装其余全部依赖，`rebot_adapter.py` 与手眼标定工具（`hand_eye_calibration_auto.py` / `handeye_joint_calib.py`）运行时均会自动切换至**内置精确纯 NumPy B601-DM 运动学/雅可比/静重力引擎**（与 Pinocchio 误差 `< 0.01 mm` / `< 0.002 Nm`），从标定到 v14/v15 真机与仿真全链路均可零 C++ 编译依赖直接运行。
+### 10.3 Orin Nano 8GB 一键低抖动运行（两档模式 + 远程浏览器预览）
 
-### 10.2 Jetson 无显示器（SSH）运行 v14 手掌跟随抓取
-
-无头模式下程序会自动切换为 **POSIX 终端按键监听**（无需 X11 显示器，SSH 终端直接按 `g` / `Space` 启停、按 `q` / `Esc` / `Ctrl+C` 或收到 `SIGTERM` 均触发缓慢回零安全退出），并每秒打印一行实时状态：
+内置启动脚本 [tools/run_orin_nano.sh](tools/run_orin_nano.sh) 会自动剥离 `/opt/ros/*`、将 `OMP/OpenBLAS/OpenCV` 线程限制在 `1~2` 核（为 200Hz 达妙 MIT 控制线程预留独占 CPU 核）并加载 [config/v14_orin_nano.yaml](config/v14_orin_nano.yaml)：
 
 ```bash
-source .venv/bin/activate
+# 每次开机后先锁定 Orin Nano 最高功耗档 + 锁频 + 256MB USB 缓冲
+sudo ./tools/jetson_perf.sh
 
-# 推荐：使用 Jetson Orin NX 专属配置（640x480@60fps + ROI 加速 + CPU XNNPACK 零 EGL 报错）
-python3 palm_follow_v14.py --v14-cfg config/v14_jetson.yaml --headless
+# 【调试 1】纯视觉演练 + 开启无头轻量 MJPEG 浏览器预览（不连机械臂）
+#          在同局域网 PC/手机浏览器打开 http://<ORIN_NANO_IP>:8081/ 即可看实时掌心框与深度 HUD（无连接时零开销）
+./tools/run_orin_nano.sh --no-arm --mjpeg-port 8081
 
-# 如需同时将 100Hz 状态实时镜像到局域网 PC 的 MuJoCo 3D 窗口：
-python3 palm_follow_v14.py --v14-cfg config/v14_jetson.yaml --headless --mujoco-host <PC_IP>
+# 【档位 A — 默认黄金稳态档（15W / 25W 均稳跑，640x480@30fps + ROI 0.60，CPU < 55%）】
+./tools/run_orin_nano.sh
 
-# 若部署在 Jetson Orin Nano Super 8GB 且负载偏高，可临时降为 30fps：
-python3 palm_follow_v14.py --v14-cfg config/v14_jetson.yaml --headless --fps 30
+# 【档位 B — Orin Nano Super 25W 高频进阶档（60fps 相机 + 隔帧光流 stride=2）】
+#          每 2 帧跑一次 MediaPipe、间隔帧用 <0.5ms LK 光流桥接，实现 60Hz 有效更新 + 30Hz CPU 算力占用！
+./tools/run_orin_nano.sh --super60
+
+# 【跨机镜像】无头真机跟随，同时把 100Hz 实时状态推给局域网 PC 的 MuJoCo 3D 窗口
+./tools/run_orin_nano.sh --mujoco-host <PC_IP>
 ```
 
-### 10.3 Jetson ↔ PC 局域网跨机 v15 双向数字孪生遥操作（强烈推荐）
+> 无头 SSH 终端直接支持按键：`g` / `Space` 启停跟随，`q` / `Esc` / `Ctrl+C` 或 `SIGTERM` 均完整执行「停伺服 → 保持 → 缓慢回零到位 → 失能」。
 
-让 **Jetson** 专心跑 200Hz 达妙底层控制与安全保护，**开发机 PC** 跑高帧率 MuJoCo 3D 原生窗口：
+### 10.4 Orin Nano 8GB ↔ PC 局域网跨机 v15 双向数字孪生遥操作
+
+把 8GB 内存完全留给 Orin Nano 的实时控制，把 MuJoCo 3D 渲染放在 PC 端：
 
 ```bash
-# 【在 PC 端】启动 MuJoCo Studio 3D 窗口，监听 0.0.0.0:19870 并把遥操作指令发往 Jetson
-./tools/launch_mujoco_twin.sh --native --udp-bind 0.0.0.0 --cmd-host <JETSON_IP> --allow-state-host <JETSON_IP>
+# 【在 PC 端】启动 MuJoCo Studio 3D 窗口，监听 0.0.0.0:19870 并向 Orin Nano 发指令
+./tools/launch_mujoco_twin.sh --native --udp-bind 0.0.0.0 --cmd-host <ORIN_NANO_IP> --allow-state-host <ORIN_NANO_IP>
 
-# 【在 Jetson 端】启动 v15 双向安全桥接（自动启用来源 IP 白名单，仅允许该 PC 遥控！）
-source .venv/bin/activate
-python3 mujoco_teleop_v15.py --state-host <PC_IP> --cmd-bind 0.0.0.0 --allow-cmd-host <PC_IP> --max-speed 20
+# 【在 Orin Nano 8GB 端】一键启动 v15 双向安全桥接（启用来源 IP 白名单，仅允许该 PC 遥控！）
+./tools/run_orin_nano.sh --teleop --state-host <PC_IP> --cmd-bind 0.0.0.0 --allow-cmd-host <PC_IP> --max-speed 20
 ```
 
 > **局域网安全保障**：
-> 1. `--allow-cmd-host <PC_IP>` 会丢弃非白名单 IP 发来的任何 UDP 遥操作包；
-> 2. 仍完整保留 8° 虚实对齐门限、250ms 断网看门狗自动软保持、0.42m 软墙、Z ≥ 5cm 护桌及 SSH 终端 `Space`/`h` 本地急停解除武装。
+> 1. `--allow-cmd-host <PC_IP>` 丢弃一切非白名单 IP 的 UDP 遥操作包；
+> 2. 完整保留 8° 虚实对齐门限、250ms 断网看门狗自动保持、0.42m 软墙、Z ≥ 5cm 护桌及 SSH 终端 `Space`/`h` 本地急停解除武装。
 
-### 10.4 可选：Jetson 无头 `systemd` 开机自启服务
+### 10.5 可选：Orin Nano 8GB 无头 `systemd` 开机自启服务
 
-仓库已在 [tools/systemd/rebot-palm-follow.service.example](tools/systemd/rebot-palm-follow.service.example) 提供服务模板（包含 `--auto-start`、`KillSignal=SIGTERM` 与 `TimeoutStopSec=35` 保障停服时完整执行缓慢回零后再失能）。**请务必先完成第 5 章全部真机标定与手动验证稳定后再启用自启服务。**
+仓库已在 [tools/systemd/rebot-palm-follow.service.example](tools/systemd/rebot-palm-follow.service.example) 提供 Orin Nano 8GB 专用服务模板（内置 `v14_orin_nano.yaml`、`OMP_NUM_THREADS=2`、`OPENBLAS_NUM_THREADS=1`、`KillSignal=SIGTERM` 与 `TimeoutStopSec=35` 保障停服时安全回零）。**务必先完成第 5 章全部真机标定与手动验证稳定后再启用自启。**
 

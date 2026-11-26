@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import unittest
+import urllib.request
 import zipfile
 
 import numpy as np
@@ -31,6 +32,7 @@ import mujoco_teleop_v15
 import palm_follow_v14
 import rebot_adapter
 from servo_v14.config import load_v14_config, validate_v14_config
+from servo_v14.mjpeg_preview import MjpegPreviewServer
 from servo_v14.mujoco_bridge import (
     MuJoCoTeleopCmdPublisher,
     MuJoCoTeleopCmdReceiver,
@@ -252,6 +254,68 @@ class JetsonReadinessTests(unittest.TestCase):
             for whl in whls:
                 with zipfile.ZipFile(whl, "r") as zf:
                     self.assertIsNone(zf.testzip(), f"Wheel 压缩包损坏: {whl}")
+
+    def test_orin_nano_8gb_config_requirements_and_super60_override(self) -> None:
+        cfg_path = ROOT / "config" / "v14_orin_nano.yaml"
+        self.assertTrue(cfg_path.is_file())
+        cfg = validate_v14_config(load_v14_config(str(cfg_path)))
+        self.assertEqual(cfg.camera.width, 640)
+        self.assertEqual(cfg.camera.height, 480)
+        self.assertEqual(cfg.camera.fps, 30)
+        self.assertEqual(cfg.camera.detector_backend, "cpu")
+        self.assertEqual(cfg.camera.detect_stride, 1)
+        self.assertEqual(cfg.camera.cv_num_threads, 2)
+        self.assertLessEqual(cfg.camera.diag_queue_size, 2048)
+        # 安全红线不可放宽
+        self.assertAlmostEqual(cfg.pbvs.distance, 0.35, places=3)
+        self.assertAlmostEqual(cfg.depth.min_valid_m, 0.07, places=3)
+        self.assertLessEqual(cfg.safety.workspace_max_radius, 0.42)
+        self.assertLessEqual(cfg.safety.max_vel, 0.85)
+        self.assertLessEqual(cfg.safety.max_vel_joints[1], 2.0)
+        self.assertLessEqual(cfg.safety.max_vel_joints[2], 2.0)
+
+        # Super 25W 高频隔帧模式参数覆盖校验
+        args = palm_follow_v14.parse_args(
+            ["--v14-cfg", str(cfg_path), "--headless", "--fps", "60", "--detect-stride", "2", "--mjpeg-port", "8081"]
+        )
+        cfg_super = palm_follow_v14.apply_cli_overrides(cfg, args)
+        self.assertEqual(cfg_super.camera.fps, 60)
+        self.assertEqual(cfg_super.camera.detect_stride, 2)
+        self.assertEqual(args.mjpeg_port, 8081)
+
+        # Orin Nano 8GB 精简依赖文件严禁包含触发 8GB OOM 编译的 pin 或 open3d
+        req_lines = [
+            ln.strip().lower()
+            for ln in (ROOT / "requirements-orin-nano.txt").read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        self.assertFalse(any(ln.startswith("pin") for ln in req_lines))
+        self.assertFalse(any("open3d" in ln for ln in req_lines))
+        self.assertTrue(any(ln.startswith("motorbridge") for ln in req_lines))
+
+    def test_mjpeg_preview_server_zero_overhead_and_stream(self) -> None:
+        srv = MjpegPreviewServer(host="127.0.0.1", port=0, max_fps=15.0, max_width=320)
+        srv.start()
+        try:
+            dummy = np.zeros((240, 320, 3), dtype=np.uint8)
+            # 无客户端时零编码开销直接返回 False
+            self.assertEqual(srv.active_clients, 0)
+            self.assertFalse(srv.push_frame(dummy))
+
+            base_url = f"http://127.0.0.1:{srv.bound_port}"
+            with urllib.request.urlopen(f"{base_url}/", timeout=2.0) as resp:
+                self.assertEqual(resp.status, 200)
+                self.assertIn(b"/stream.mjpg", resp.read())
+
+            # 强制推送一帧后，/stream.mjpg 应输出有效 JPEG (0xFFD8 ... 0xFFD9)
+            self.assertTrue(srv.push_frame(dummy, force=True))
+            with urllib.request.urlopen(f"{base_url}/stream.mjpg", timeout=2.0) as resp:
+                self.assertEqual(resp.status, 200)
+                chunk = resp.read(1024)
+                self.assertIn(b"image/jpeg", chunk)
+                self.assertIn(b"\xff\xd8", chunk)
+        finally:
+            srv.stop()
 
 
 if __name__ == "__main__":

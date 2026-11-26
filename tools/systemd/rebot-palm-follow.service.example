@@ -1,8 +1,8 @@
 # ==============================================================================
-# Seeed reBot Arm B601-DM + Orbbec Gemini 305 Jetson Orin NX systemd 服务示例
+# Seeed reBot Arm B601-DM + Orbbec Gemini 305 — Jetson Orin Nano 8GB systemd 模板
 # ==============================================================================
 # 安全须知：
-#   - 强烈建议完成全部 7 步实机标定与手动验证稳定后再启用开机自启！
+#   - 强烈建议完成全部真机标定与手动验证稳定后再启用开机自启！
 #   - 必须保留 KillSignal=SIGTERM 与 TimeoutStopSec=35，确保停止服务时触发
 #     程序内置的「停止伺服 → 原地保持 → 缓慢回零到位 → 失能」红线流程，严禁高空掉臂。
 #
@@ -15,7 +15,7 @@
 # ==============================================================================
 
 [Unit]
-Description=Seeed reBot Arm B601-DM + Gemini 305 Visual Servo (Jetson Orin)
+Description=Seeed reBot Arm B601-DM + Gemini 305 Visual Servo (Jetson Orin Nano 8GB)
 After=network-online.target multi-user.target
 Wants=network-online.target
 
@@ -26,8 +26,11 @@ Group=dialout
 SupplementaryGroups=video
 WorkingDirectory=<PROJECT_DIR>
 Environment="PYTHONUNBUFFERED=1"
+Environment="OMP_NUM_THREADS=2"
+Environment="OPENBLAS_NUM_THREADS=1"
+Environment="MKL_NUM_THREADS=1"
 ExecStart=<PROJECT_DIR>/.venv/bin/python <PROJECT_DIR>/palm_follow_v14.py \
-    --v14-cfg <PROJECT_DIR>/config/v14_jetson.yaml \
+    --v14-cfg <PROJECT_DIR>/config/v14_orin_nano.yaml \
     --headless \
     --auto-start \
     --no-mujoco-sync

@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import signal
 import sys
 import threading
@@ -59,6 +60,7 @@ from servo_v14.config import (
     validate_v14_config,
 )
 from servo_v14.depth_guard import DepthProtectionChain
+from servo_v14.mjpeg_preview import MjpegPreviewServer
 from servo_v14.mujoco_bridge import DEFAULT_MUJOCO_HOST, DEFAULT_MUJOCO_PORT, MuJoCoTwinPublisher
 from servo_v14.pipeline import ServoV14Pipeline
 from servo_v14.robot_backend import (
@@ -158,9 +160,54 @@ def load_grasp_cfg(path: str) -> dict:
         return yaml.safe_load(stream) or {}
 
 
+def detect_default_v14_cfg() -> str:
+    """按运行平台自动选择默认 v14 配置文件：
+    - Jetson Orin Nano 8GB -> config/v14_orin_nano.yaml
+    - 其他 Jetson ARM64（如 Orin NX / AGX Orin）-> config/v14_jetson.yaml
+    - x86_64 桌面主机 -> config/v14.yaml
+    """
+    nano_cfg = os.path.join(ROOT, "config", "v14_orin_nano.yaml")
+    jetson_cfg = os.path.join(ROOT, "config", "v14_jetson.yaml")
+    default_cfg = os.path.join(ROOT, "config", "v14.yaml")
+
+    model_txt = ""
+    try:
+        with open("/proc/device-tree/model", "rb") as f:
+            model_txt = f.read().replace(b"\x00", b"").decode("utf-8", errors="ignore").lower()
+    except OSError:
+        pass
+
+    if "orin nano" in model_txt and os.path.isfile(nano_cfg):
+        return nano_cfg
+
+    is_arm_jetson = platform.machine() == "aarch64" and (
+        os.path.isfile("/etc/nv_tegra_release") or "jetson" in model_txt or "orin" in model_txt
+    )
+    if is_arm_jetson:
+        try:
+            mem_kb = 0
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        mem_kb = int(line.split()[1])
+                        break
+            if 0 < mem_kb <= 9_800_000 and os.path.isfile(nano_cfg):
+                return nano_cfg
+        except OSError:
+            pass
+        if os.path.isfile(jetson_cfg):
+            return jetson_cfg
+
+    return default_cfg
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="B601-DM + Gemini 305 v14.0 视觉伺服 + 捏合抓取主程序")
-    p.add_argument("--v14-cfg", default=os.path.join(ROOT, "config", "v14.yaml"), help="v14 配置文件路径")
+    p.add_argument(
+        "--v14-cfg",
+        default=None,
+        help="v14 配置文件路径（省略时自动按平台选用 v14.yaml / v14_jetson.yaml / v14_orin_nano.yaml）",
+    )
     p.add_argument("--grasp-cfg", default=os.path.join(ROOT, "config", "grasp.yaml"), help="夹爪捏合配置文件路径")
     p.add_argument("--no-arm", action="store_true", help="纯视觉演练（不连接机械臂）")
     p.add_argument("--sim", action="store_true", help="启用离线数字孪生机械臂后端（不碰真机总线）")
@@ -178,6 +225,18 @@ def parse_args(argv=None) -> argparse.Namespace:
         choices=("auto", "cpu", "gpu"),
         default=None,
         help="覆盖 MediaPipe 推理后端（Jetson 无头推荐 cpu）",
+    )
+    p.add_argument(
+        "--detect-stride",
+        type=int,
+        default=None,
+        help="MediaPipe 跳帧步长 (1~4)；设为 2 时每 2 帧检测一次、间隔帧由 LK 光流桥接（Orin Nano 60fps 推荐）",
+    )
+    p.add_argument(
+        "--mjpeg-port",
+        type=int,
+        default=0,
+        help="可选：开启无头轻量 MJPEG 浏览器调试预览端口（如 8081 -> http://<IP>:8081/；默认 0 关闭零开销）",
     )
     p.add_argument("--no-mujoco-sync", action="store_true", help="关闭向 MuJoCo Studio 数字孪生的 UDP 同步")
     p.add_argument(
@@ -205,12 +264,17 @@ def apply_cli_overrides(cfg: V14Config, args: argparse.Namespace) -> V14Config:
         cam = replace(cam, fps=args.fps)
     if getattr(args, "detector_backend", None) is not None:
         cam = replace(cam, detector_backend=str(args.detector_backend).lower())
+    if getattr(args, "detect_stride", None) is not None:
+        cam = replace(cam, detect_stride=int(args.detect_stride))
     return validate_v14_config(replace(cfg, pbvs=pbvs, safety=safety, camera=cam))
 
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    cfg = apply_cli_overrides(load_v14_config(args.v14_cfg), args)
+    v14_cfg_path = args.v14_cfg or detect_default_v14_cfg()
+    cfg = apply_cli_overrides(load_v14_config(v14_cfg_path), args)
+    if cfg.camera.cv_num_threads > 0:
+        cv2.setNumThreads(int(cfg.camera.cv_num_threads))
     grasp_cfg = load_grasp_cfg(args.grasp_cfg)
     gripper_mapper = PinchGripperMapper(grasp_cfg)
     enable_follow = (not args.no_arm) and (not args.no_follow)
@@ -221,8 +285,9 @@ def main(argv=None) -> int:
     print("=" * 68)
     mode_tag = "SIM数字孪生" if args.sim else ("纯视觉" if args.no_arm else "B601-DM真机")
     print(
-        f"后端: {mode_tag} | follow={'ON' if enable_follow else 'OFF'} "
-        f"| gripper={'ON' if enable_gripper else 'OFF'} | fps={cfg.camera.fps}"
+        f"配置: {os.path.basename(v14_cfg_path)} | 后端: {mode_tag} | follow={'ON' if enable_follow else 'OFF'} "
+        f"| gripper={'ON' if enable_gripper else 'OFF'} | {cfg.camera.width}x{cfg.camera.height}@{cfg.camera.fps}fps "
+        f"| stride={cfg.camera.detect_stride}"
     )
     print(
         f"参数: distance={cfg.pbvs.distance:.2f}m gain={cfg.pbvs.gain:.2f}/{cfg.pbvs.gain_x:.2f} "
@@ -238,6 +303,7 @@ def main(argv=None) -> int:
     detector: Optional[PalmDetector] = None
     diag: Optional[DiagnosticRecorder] = None
     mj_pub: Optional[MuJoCoTwinPublisher] = None
+    preview_srv: Optional[MjpegPreviewServer] = None
     kb_listener = None
 
     stop_event = threading.Event()
@@ -440,12 +506,20 @@ def main(argv=None) -> int:
         kb_backend = kb_listener.start()
         print(f"[按键] 键盘监听后端: {kb_backend}（g/空格 启停跟随 | q/Esc/Ctrl+C 安全回零退出）")
 
+        if int(args.mjpeg_port) > 0:
+            preview_srv = MjpegPreviewServer(port=int(args.mjpeg_port))
+            preview_srv.start()
+            print(f"[预览] 无头轻量 MJPEG 调试流已就绪 -> http://<本机IP>:{preview_srv.bound_port}/ （无浏览器连接时零开销）")
+
         if args.auto_start and enable_follow:
             print("[v14] --auto-start 已启用：到达 HOME 后自动开始手掌跟随")
             toggle_following()
 
         seq = 0
+        frame_idx = 0
         lost_streak = 0
+        prev_had_hand = False
+        detect_stride = max(1, int(cfg.camera.detect_stride))
         fps_win_t = time.monotonic()
         fps_win_frames = 0
         vis_fps = 0.0
@@ -458,15 +532,32 @@ def main(argv=None) -> int:
                 time.sleep(0.002)
                 continue
 
+            frame_idx += 1
             hw_ts_raw, _ = camera.get_last_frame_timing()
             hw_ts = hw_ts_raw if cfg.camera.hw_timestamp_enable else None
             meas_t, hw_used = ts_cal.update(hw_ts, host_t)
 
-            u_det, v_det, landmarks = detector.detect(color_img)
+            # 跳帧加速（detect_stride > 1）：已锁定手掌时，间隔帧跳过 MediaPipe 直接由 <0.5ms LK 光流桥接；
+            # 一旦光流丢跟，同帧立即补跑全图/ROI MediaPipe 检测，零额外掉帧惩罚。
+            skip_det = (
+                detect_stride > 1
+                and cfg.camera.hybrid_track_enable
+                and prev_had_hand
+                and (frame_idx % detect_stride) != 0
+            )
+            if skip_det:
+                u_det, v_det, landmarks = None, None, None
+                out_u, out_v, src = lk_bridge.update(color_img, None)
+                if out_u is None:
+                    u_det, v_det, landmarks = detector.detect(color_img)
+                    det_uv = (u_det, v_det) if u_det is not None else None
+                    out_u, out_v, src = lk_bridge.update(color_img, det_uv)
+            else:
+                u_det, v_det, landmarks = detector.detect(color_img)
+                det_uv = (u_det, v_det) if u_det is not None else None
+                out_u, out_v, src = lk_bridge.update(color_img, det_uv)
             proc_s = time.perf_counter() - t0
-
-            det_uv = (u_det, v_det) if u_det is not None else None
-            out_u, out_v, src = lk_bridge.update(color_img, det_uv)
+            prev_had_hand = out_u is not None
             track = tracker.update((out_u, out_v) if out_u is not None else None)
 
             if enable_gripper and backend is not None and landmarks is not None and src == "det":
@@ -545,7 +636,9 @@ def main(argv=None) -> int:
                 fps_win_frames = 0
                 fps_win_t = now_fps
 
-            if not args.headless:
+            need_overlay = (not args.headless) or (preview_srv is not None and preview_srv.active_clients > 0)
+            vis = None
+            if need_overlay:
                 vis = color_img.copy()
                 if landmarks is not None:
                     draw_landmarks(vis, landmarks)
@@ -553,13 +646,17 @@ def main(argv=None) -> int:
                     draw_palm(vis, track, int(camera.cx), int(camera.cy))
                 hud = f"B601-DM v14 [{cur_mode.value}] err={cur_err * 100:.1f}cm {vis_fps:.0f}fps"
                 cv2.putText(vis, hud, (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                if preview_srv is not None and preview_srv.active_clients > 0:
+                    preview_srv.push_frame(vis)
+
+            if not args.headless and vis is not None:
                 cv2.imshow("reBot B601-DM + Gemini 305 Palm Follow", vis)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), 27):
                     stop_event.set()
                 elif key in (ord("g"), ord(" ")) and enable_follow:
                     toggle_following()
-            elif now_fps - last_headless_print >= 1.0:
+            elif args.headless and (now_fps - last_headless_print >= 1.0):
                 last_headless_print = now_fps
                 z_str = f"{obs_new.p_cam[2]:.2f}m" if (obs_new.visible and obs_new.p_cam is not None) else "---"
                 print(
@@ -601,6 +698,8 @@ def main(argv=None) -> int:
                 pass
         if diag is not None:
             diag.close()
+        if preview_srv is not None:
+            preview_srv.stop()
         if mj_pub is not None:
             mj_pub.close()
         if backend is not None:

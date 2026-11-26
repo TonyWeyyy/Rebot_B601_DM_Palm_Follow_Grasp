@@ -1,0 +1,19 @@
+# ==============================================================================
+# NVIDIA Jetson Orin Nano 8GB 轻量核心依赖清单（requirements-orin-nano.txt）
+# ==============================================================================
+# 针对 8GB 统一内存 + ARM64 (aarch64, JetPack 6 / Python 3.10) 的专项精简：
+#   1. 不包含 `pin` (Pinocchio)，彻底避免在 8GB 内存上触发 C++/cmeel 本地编译 OOM；
+#      运行时 rebot_adapter.py 自动启用内置精确纯 NumPy B601-DM 运动学/重力引擎
+#      （经实测与 Pinocchio 误差 < 0.1 mm / < 0.002 Nm）。
+#   2. `pyorbbecsdk2` 由 tools/setup_env.sh 单独使用 `--no-deps` 从内置
+#      third_party/wheels/aarch64/ 安装，避免拉入 ARM64 上无轮子且臃肿的
+#      open3d==0.18.0 / pygame / av 以及与 opencv-contrib-python 冲突的 opencv-python。
+# ==============================================================================
+
+numpy>=1.24
+pyyaml>=6.0
+opencv-contrib-python>=4.8
+mediapipe>=0.10.14
+motorbridge>=0.5
+pynput>=1.7
+scipy>=1.10
